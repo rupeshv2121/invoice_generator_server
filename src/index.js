@@ -6,10 +6,7 @@ import express from 'express';
 // Configure environment variables
 dotenv.config();
 
-console.log('DATABASE_URL:', process.env.DATABASE_URL);
-
 // Import routes
-import authRoutes from './routes/auth.js';
 import companyRoutes from './routes/company.js';
 import customerRoutes from './routes/customer.js';
 import invoiceRoutes from './routes/invoice.js';
@@ -17,11 +14,17 @@ import itemRoutes from './routes/item.js';
 import settingsRoutes from './routes/settings.js';
 
 // Import middleware
-import { authenticateToken } from './middleware/auth.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 // Import Prisma client
+import { createClient } from '@supabase/supabase-js';
+import { supabaseAuth } from './middleware/auth.js';
 import prisma from './utils/prismaClient.js';
+
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -40,13 +43,12 @@ app.get('/health', (req, res) => {
     res.json({ status: 'OK', message: 'Invoice Generator Server is running!' });
 });
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/company', authenticateToken, companyRoutes);
-app.use('/api/customer', authenticateToken, customerRoutes);
-app.use('/api/item', authenticateToken, itemRoutes);
-app.use('/api/invoice', authenticateToken, invoiceRoutes);
-app.use('/api/settings', authenticateToken, settingsRoutes);
+
+app.use('/api/company', supabaseAuth, companyRoutes);
+app.use('/api/customer', supabaseAuth, customerRoutes);
+app.use('/api/item', supabaseAuth, itemRoutes);
+app.use('/api/invoice', supabaseAuth, invoiceRoutes);
+app.use('/api/settings', supabaseAuth, settingsRoutes);
 
 // Error handling middleware
 app.use(errorHandler);

@@ -1,34 +1,21 @@
-import jwt from 'jsonwebtoken';
-import prisma from '../utils/prismaClient.js';
 
-export const authenticateToken = async (req, res, next) => {
+export async function supabaseAuth(req, res, next) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No token provided' });
+
+    const token = authHeader.split(' ')[1];
+    if (!token) return res.status(401).json({ error: 'Malformed token' });
+
     try {
-        const authHeader = req.headers['authorization'];
-        const access_token = authHeader && authHeader.split(' ')[1]; // Bearer access_token
+        const { data, error } = await supabase.auth.getUser(token);
+        if (error || !data.user) return res.status(401).json({ error: 'Invalid token' });
 
-        if (!access_token) {
-            return res.status(401).json({ error: 'Access access_token required' });
-        }
-
-        const decoded = jwt.verify(access_token, process.env.JWT_SECRET || 'your-secret-key');
-
-        // Get user from database
-        const user = await prisma.user.findUnique({
-            where: { id: decoded.userId },
-            select: { id: true, email: true, name: true, role: true, isActive: true }
-        });
-
-        if (!user || !user.isActive) {
-            return res.status(401).json({ error: 'Invalid or inactive user' });
-        }
-
-        req.user = user;
+        req.user = data.user; // attach user info to request
         next();
-    } catch (error) {
-        console.error('Auth middleware error:', error);
-        return res.status(403).json({ error: 'Invalid access_token' });
+    } catch (err) {
+        return res.status(401).json({ error: 'Unauthorized' });
     }
-};
+}
 
 export const requireRole = (roles) => {
     return (req, res, next) => {
