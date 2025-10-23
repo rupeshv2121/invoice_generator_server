@@ -18,10 +18,7 @@ router.get('/', async (req, res, next) => {
 
         // Build where clause
         const where = {
-            isActive: true,
-            company: {
-                userId: req.user.id
-            }
+            isActive: true
         };
 
         if (companyId) {
@@ -39,11 +36,6 @@ router.get('/', async (req, res, next) => {
         const [items, total] = await Promise.all([
             prisma.item.findMany({
                 where,
-                include: {
-                    company: {
-                        select: { id: true, companyName: true }
-                    }
-                },
                 orderBy: { name: 'asc' },
                 skip,
                 take: parseInt(limit)
@@ -103,28 +95,28 @@ router.post('/', async (req, res, next) => {
             });
         }
 
-        // Verify company belongs to user
-        const company = await prisma.company.findFirst({
-            where: {
-                id: validation.data.companyId,
-                userId: req.user.id
+        const { name, hsnCode, purchasePrice, sellingPrice, unit, cgstRate, sgstRate, igstRate, description } = validation.data;
+
+        // Company is optional, so we don't need to fetch or create it
+
+        const newItem = await prisma.item.create({
+            data: {
+                name,
+                description,
+                hsnCode: parseInt(hsnCode),
+                purchasePrice,
+                sellingPrice,
+                unit,
+                cgstRate,
+                sgstRate,
+                igstRate,
+                companyId: null, // Company is optional
+                isActive: true
             }
         });
 
-        if (!company) {
-            return res.status(400).json({ error: 'Invalid company ID' });
-        }
-
-        const item = await prisma.item.create({
-            data: validation.data,
-            include: {
-                company: {
-                    select: { id: true, companyName: true }
-                }
-            }
-        });
-
-        res.status(201).json(item);
+        console.log("Backend New Item : ", newItem)
+        res.status(201).json({ success: true, item: newItem });
     } catch (error) {
         next(error);
     }
@@ -133,6 +125,10 @@ router.post('/', async (req, res, next) => {
 // Update item
 router.patch('/:id', async (req, res, next) => {
     try {
+        if (!req.body || Object.keys(req.body).length === 0) {
+            return res.status(400).json({ error: 'No data provided for update' });
+        }
+
         const validation = validateItemUpdate(req.body);
         if (!validation.success) {
             return res.status(400).json({
@@ -141,55 +137,58 @@ router.patch('/:id', async (req, res, next) => {
             });
         }
 
-        // Use string ID instead of integer
-        const itemId = req.params.id; // keep it as string
+        const itemId = req.params.id;
 
-        // Check if item exists and belongs to user's company
-        const existingItem = await prisma.item.findFirst({
-            where: {
-                id: itemId, // <-- string
-                company: {
-                    userId: req.user.id
-                }
-            }
+        const existingItem = await prisma.item.findUnique({
+            where: { id: itemId }
         });
+
+        console.log("Existing Item for Update : ", existingItem)
 
         if (!existingItem) {
             return res.status(404).json({ error: 'Item not found' });
         }
 
-        const item = await prisma.item.update({
-            where: { id: itemId }, // <-- string
+        const updatedItem = await prisma.item.update({
+            where: { id: itemId },
             data: validation.data,
-            include: {
-                company: {
-                    select: { id: true, companyName: true }
-                }
-            }
         });
 
-        res.json(item);
+        console.log("Backend Updated Item : ", updatedItem)
+
+        res.status(201).json({
+            success: true,
+            message: 'Item updated successfully',
+            item: updatedItem
+        });
+
     } catch (error) {
+        console.error('Error updating item:', error);
         next(error);
     }
 });
 
 
 // Soft delete item
-// Soft delete item
 router.delete('/:id', async (req, res, next) => {
     try {
         const itemId = req.params.id; // keep it as string
+        console.log("Deleting item with ID : ", itemId)
 
         // Check if item exists and belongs to user's company
+        // const existingItem = await prisma.item.findFirst({
+        //     where: {
+        //         id: itemId, // <-- string
+        //         company: {
+        //             userId: req.user.id
+        //         }
+        //     }
+        // });
+
         const existingItem = await prisma.item.findFirst({
-            where: {
-                id: itemId, // <-- string
-                company: {
-                    userId: req.user.id
-                }
-            }
+            where: { id: req.params.id }
         });
+        console.log("Deleting item  : ", existingItem)
 
         if (!existingItem) {
             return res.status(404).json({ error: 'Item not found' });
@@ -200,7 +199,7 @@ router.delete('/:id', async (req, res, next) => {
             data: { isActive: false }
         });
 
-        res.json({ message: 'Item deleted successfully' });
+        res.status(200).json({ message: 'Item deleted successfully' });
     } catch (error) {
         next(error);
     }
@@ -256,33 +255,31 @@ router.get('/search/autocomplete', async (req, res, next) => {
 });
 
 // Get item statistics
-router.get('/stats/overview', async (req, res, next) => {
+router.get('/stats', async (req, res, next) => {
     try {
         const { companyId } = req.query;
 
-        const where = {
-            isActive: true,
-            company: {
-                userId: req.user.id
-            }
+        // Base filter
+        let where = {
+            isActive: true
         };
 
         if (companyId) {
             where.companyId = parseInt(companyId);
+        } else {
+            // Filter items that either belong to user's companies OR have null companyId
+            where.OR = [
+                { companyId: null },
+                { company: { userId: req.user.id } }
+            ];
         }
 
-        const [
-            totalItems,
-            itemsUsedInInvoices,
-            averageRate
-        ] = await Promise.all([
+        const [totalItems, itemsUsedInInvoices, averageRate] = await Promise.all([
             prisma.item.count({ where }),
             prisma.item.count({
                 where: {
                     ...where,
-                    invoiceItems: {
-                        some: {}
-                    }
+                    invoiceItems: { some: {} }
                 }
             }),
             prisma.item.aggregate({
@@ -301,5 +298,7 @@ router.get('/stats/overview', async (req, res, next) => {
         next(error);
     }
 });
+
+
 
 export default router;

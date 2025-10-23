@@ -1,4 +1,6 @@
 
+import { supabase } from '../utils/supabaseClient.js';
+
 export async function supabaseAuth(req, res, next) {
     const authHeader = req.headers.authorization;
     if (!authHeader) return res.status(401).json({ error: 'No token provided' });
@@ -8,11 +10,18 @@ export async function supabaseAuth(req, res, next) {
 
     try {
         const { data, error } = await supabase.auth.getUser(token);
-        if (error || !data.user) return res.status(401).json({ error: 'Invalid token' });
 
-        req.user = data.user; // attach user info to request
+        // console.log('Token:', token);
+        // console.log('Supabase getUser data:', data, 'error:', error);
+
+        if (error || !data.user) {
+            return res.status(401).json({ error: 'Invalid or expired token' });
+        }
+
+        req.user = data.user;
         next();
     } catch (err) {
+        console.error('Auth middleware error:', err);
         return res.status(401).json({ error: 'Unauthorized' });
     }
 }

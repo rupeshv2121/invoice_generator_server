@@ -17,14 +17,8 @@ import settingsRoutes from './routes/settings.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 // Import Prisma client
-import { createClient } from '@supabase/supabase-js';
 import { supabaseAuth } from './middleware/auth.js';
 import prisma from './utils/prismaClient.js';
-
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY
-);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
