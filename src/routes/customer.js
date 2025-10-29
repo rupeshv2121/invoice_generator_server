@@ -4,37 +4,38 @@ import prisma from '../utils/prismaClient.js';
 
 const router = express.Router();
 // Get all customers with search and pagination
+// Get all customers with search and pagination
 router.get('/', async (req, res, next) => {
     try {
         const {
             search = '',
             page = 1,
-            limit = 10,
-            companyId
+            limit = 10
         } = req.query;
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
         // Build where clause
         const where = {
-            isActive: true,
-            company: {
-                userId: req.user.id
-            }
+            isActive: true
         };
 
-        if (companyId) {
-            where.companyId = parseInt(companyId);
-        }
+        // Optionally filter by companyProfileId if user has a company
+        // Uncomment below if you want to filter by user's company
+        // const userCompany = await prisma.companyProfile.findFirst({ where: { userId: req.user.id }, select: { id: true } });
+        // if (userCompany) where.companyProfileId = userCompany.id;
 
         if (search) {
             where.OR = [
                 { name: { contains: search, mode: 'insensitive' } },
+                { companyName: { contains: search, mode: 'insensitive' } },
                 { email: { contains: search, mode: 'insensitive' } },
                 { phone: { contains: search, mode: 'insensitive' } },
                 { gstin: { contains: search, mode: 'insensitive' } }
             ];
         }
+
+        console.log('Customer query where:', where);
 
         const [customers, total] = await Promise.all([
             prisma.customer.findMany({
@@ -106,6 +107,8 @@ router.get('/:id', async (req, res, next) => {
 // Create new customer
 router.post('/', async (req, res, next) => {
     try {
+        console.log("Incoming Customer Data:", req.body);
+
         const validation = validateCustomer(req.body);
         if (!validation.success) {
             return res.status(400).json({
@@ -114,20 +117,38 @@ router.post('/', async (req, res, next) => {
             });
         }
 
-        // Verify company belongs to user
-        const company = await prisma.company.findFirst({
-            where: {
-                id: validation.data.companyId,
-                userId: req.user.id
-            }
-        });
+        const customerData = validation.data;
 
-        if (!company) {
-            return res.status(400).json({ error: 'Invalid company ID' });
+        // Get user's company profile if exists
+        let companyProfileId = null;
+        try {
+            const userCompany = await prisma.companyProfile.findFirst({
+                where: { userId: req.user.id },
+                select: { id: true }
+            });
+            companyProfileId = userCompany?.id || null;
+        } catch (error) {
+            console.log("No company profile found for user:", req.user.id);
         }
 
+        // Create customer
         const customer = await prisma.customer.create({
-            data: validation.data,
+            data: {
+                name: customerData.name,
+                companyName: customerData.companyName,
+                address: customerData.address,
+                city: customerData.city,
+                state: customerData.state,
+                pincode: customerData.pincode,
+                country: customerData.country || 'India',
+                phone: customerData.phone,
+                email: customerData.email,
+                EximCode: customerData.EximCode,
+                gstin: customerData.gstin,
+                pan: customerData.pan,
+                companyProfileId: companyProfileId,
+                isActive: true
+            },
             include: {
                 company: {
                     select: { id: true, companyName: true }
@@ -137,9 +158,11 @@ router.post('/', async (req, res, next) => {
 
         res.status(201).json(customer);
     } catch (error) {
+        console.error("Create customer error:", error);
         next(error);
     }
 });
+
 
 // Update customer
 router.patch('/:id', async (req, res, next) => {
@@ -152,13 +175,11 @@ router.patch('/:id', async (req, res, next) => {
             });
         }
 
-        // Check if customer exists and belongs to user's company
+        // Check if customer exists
         const existingCustomer = await prisma.customer.findFirst({
             where: {
-                id: parseInt(req.params.id),
-                company: {
-                    userId: req.user.id
-                }
+                id: req.params.id,
+                isActive: true
             }
         });
 
@@ -167,7 +188,7 @@ router.patch('/:id', async (req, res, next) => {
         }
 
         const customer = await prisma.customer.update({
-            where: { id: parseInt(req.params.id) },
+            where: { id: req.params.id },
             data: validation.data,
             include: {
                 company: {
@@ -185,13 +206,11 @@ router.patch('/:id', async (req, res, next) => {
 // Soft delete customer
 router.delete('/:id', async (req, res, next) => {
     try {
-        // Check if customer exists and belongs to user's company
+        // Check if customer exists
         const existingCustomer = await prisma.customer.findFirst({
             where: {
-                id: parseInt(req.params.id),
-                company: {
-                    userId: req.user.id
-                }
+                id: req.params.id,
+                isActive: true
             }
         });
 
@@ -200,7 +219,7 @@ router.delete('/:id', async (req, res, next) => {
         }
 
         await prisma.customer.update({
-            where: { id: parseInt(req.params.id) },
+            where: { id: req.params.id },
             data: { isActive: false }
         });
 
@@ -213,18 +232,9 @@ router.delete('/:id', async (req, res, next) => {
 // Get customer statistics
 router.get('/stats/overview', async (req, res, next) => {
     try {
-        const { companyId } = req.query;
-
         const where = {
-            isActive: true,
-            company: {
-                userId: req.user.id
-            }
+            isActive: true
         };
-
-        if (companyId) {
-            where.companyId = parseInt(companyId);
-        }
 
         const [
             totalCustomers,
