@@ -4,7 +4,66 @@ import prisma from '../utils/prismaClient.js';
 
 const router = express.Router();
 // Get all customers with search and pagination
-// Get all customers with search and pagination
+
+// Get customer statistics
+router.get('/stats', async (req, res, next) => {
+    try {
+        const where = { isActive: true };
+
+        const [
+            totalCustomers,
+            newCustomersThisMonth,
+            customersWithInvoices,
+            gstRegisteredCount,
+            outstandingAmountData
+        ] = await Promise.all([
+            prisma.customer.count({ where }),
+            prisma.customer.count({
+                where: {
+                    ...where,
+                    createdAt: {
+                        gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+                    }
+                }
+            }),
+            prisma.customer.count({
+                where: {
+                    ...where,
+                    invoices: {
+                        some: {}
+                    }
+                }
+            }),
+            // prisma.customer.count({
+            //     where: {
+            //         ...where,
+            //         gstRegistered: true  // assuming this boolean column exists
+            //     }
+            // }),
+            // prisma.invoice.aggregate({
+            //     _sum: {
+            //         balanceDue: true  // assuming your invoices table has a balanceDue field
+            //     }
+            // })
+        ]);
+
+        // const outstandingAmount = outstandingAmountData._sum.balanceDue || 0;
+
+        res.json({
+            totalCustomers,
+            newCustomersThisMonth,
+            customersWithInvoices,
+            customersWithoutInvoices: totalCustomers - customersWithInvoices,
+            gstRegisteredCount,
+            // outstandingAmount
+        });
+    } catch (error) {
+        next(error);
+    }
+});
+
+
+
 router.get('/', async (req, res, next) => {
     try {
         const {
@@ -224,48 +283,6 @@ router.delete('/:id', async (req, res, next) => {
         });
 
         res.json({ message: 'Customer deleted successfully' });
-    } catch (error) {
-        next(error);
-    }
-});
-
-// Get customer statistics
-router.get('/stats/overview', async (req, res, next) => {
-    try {
-        const where = {
-            isActive: true
-        };
-
-        const [
-            totalCustomers,
-            newCustomersThisMonth,
-            customersWithInvoices
-        ] = await Promise.all([
-            prisma.customer.count({ where }),
-            prisma.customer.count({
-                where: {
-                    ...where,
-                    createdAt: {
-                        gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-                    }
-                }
-            }),
-            prisma.customer.count({
-                where: {
-                    ...where,
-                    invoices: {
-                        some: {}
-                    }
-                }
-            })
-        ]);
-
-        res.json({
-            totalCustomers,
-            newCustomersThisMonth,
-            customersWithInvoices,
-            customersWithoutInvoices: totalCustomers - customersWithInvoices
-        });
     } catch (error) {
         next(error);
     }

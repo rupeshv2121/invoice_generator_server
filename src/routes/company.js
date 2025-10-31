@@ -126,24 +126,24 @@ router.delete('/:id', async (req, res, next) => {
 });
 
 // Get company profile (main company for user)
-router.get('/profile/main', async (req, res, next) => {
-    try {
-        const company = await prisma.company.findFirst({
-            where: {
-                userId: req.user.id,
-                isActive: true
-            },
-            orderBy: { createdAt: 'asc' } // Get the first created company as main
-        });
-
-        if (!company) {
-            return res.status(404).json({ error: 'No company profile found' });
-        }
-
-        res.json(company);
-    } catch (error) {
-        next(error);
-    }
-});
+// router.get('/profile/main', async (req, res, next) => {
+//     try {
+//         const company = await prisma.company.findFirst({
+//             where: {
+//                 userId: req.user.id,
+//                 isActive: true
+//             },
+//             orderBy: { createdAt: 'asc' } // Get the first created company as main
+//         });
+//
+//         if (!company) {
+//             return res.status(404).json({ error: 'No company profile found' });
+//         }
+//
+//         res.json(company);
+//     } catch (error) {
+//         next(error);
+//     }
+// });
 
 export default router;

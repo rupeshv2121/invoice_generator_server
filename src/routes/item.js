@@ -4,6 +4,65 @@ import prisma from '../utils/prismaClient.js';
 
 const router = express.Router();
 
+// Get item statistics
+// Get customer statistics
+router.get('/stats', async (req, res, next) => {
+    try {
+        const where = { isActive: true };
+
+        const [
+            totalCustomers,
+            newCustomersThisMonth,
+            customersWithInvoices,
+            gstRegisteredCount,
+            // outstandingAmountData
+        ] = await Promise.all([
+            prisma.customer.count({ where }),
+            prisma.customer.count({
+                where: {
+                    ...where,
+                    createdAt: {
+                        gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+                    }
+                }
+            }),
+            prisma.customer.count({
+                where: {
+                    ...where,
+                    invoices: {
+                        some: {}
+                    }
+                }
+            }),
+            prisma.customer.count({
+                where: {
+                    ...where,
+                    // gstRegistered: true  // assuming this boolean column exists
+                }
+            }),
+            // prisma.invoice.aggregate({
+            //     _sum: {
+            //         balanceDue: true  // assuming your invoices table has a balanceDue field
+            //     }
+            // })
+        ]);
+
+        // const outstandingAmount = outstandingAmountData._sum.balanceDue || 0;
+
+        res.json({
+            totalCustomers,
+            newCustomersThisMonth,
+            customersWithInvoices,
+            customersWithoutInvoices: totalCustomers - customersWithInvoices,
+            gstRegisteredCount,
+            // outstandingAmount
+        });
+    } catch (error) {
+        next(error);
+    }
+});
+
+
 // Get all items with search and pagination
 router.get('/', async (req, res, next) => {
     try {
@@ -21,9 +80,9 @@ router.get('/', async (req, res, next) => {
             isActive: true
         };
 
-        if (companyId) {
-            where.companyId = parseInt(companyId);
-        }
+        // if (companyId) {
+        //     where.companyId = parseInt(companyId);
+        // }
 
         if (search) {
             where.OR = [
@@ -57,32 +116,32 @@ router.get('/', async (req, res, next) => {
     }
 });
 
-// Get item by ID
-router.get('/:id', async (req, res, next) => {
-    try {
-        const item = await prisma.item.findFirst({
-            where: {
-                id: parseInt(req.params.id),
-                company: {
-                    userId: req.user.id
-                }
-            },
-            include: {
-                company: {
-                    select: { id: true, companyName: true }
-                }
-            }
-        });
+// // Get item by ID
+// router.get('/:id', async (req, res, next) => {
+//     try {
+//         const item = await prisma.item.findFirst({
+//             where: {
+//                 id: parseInt(req.params.id),
+//                 company: {
+//                     userId: req.user.id
+//                 }
+//             },
+//             include: {
+//                 company: {
+//                     select: { id: true, companyName: true }
+//                 }
+//             }
+//         });
 
-        if (!item) {
-            return res.status(404).json({ error: 'Item not found' });
-        }
+//         if (!item) {
+//             return res.status(404).json({ error: 'Item not found' });
+//         }
 
-        res.json(item);
-    } catch (error) {
-        next(error);
-    }
-});
+//         res.json(item);
+//     } catch (error) {
+//         next(error);
+//     }
+// });
 
 // Create new item
 router.post('/', async (req, res, next) => {
@@ -254,50 +313,7 @@ router.get('/search/autocomplete', async (req, res, next) => {
     }
 });
 
-// Get item statistics
-router.get('/stats', async (req, res, next) => {
-    try {
-        const { companyId } = req.query;
 
-        // Base filter
-        let where = {
-            isActive: true
-        };
-
-        if (companyId) {
-            where.companyId = parseInt(companyId);
-        } else {
-            // Filter items that either belong to user's companies OR have null companyId
-            where.OR = [
-                { companyId: null },
-                { company: { userId: req.user.id } }
-            ];
-        }
-
-        const [totalItems, itemsUsedInInvoices, averageRate] = await Promise.all([
-            prisma.item.count({ where }),
-            prisma.item.count({
-                where: {
-                    ...where,
-                    invoiceItems: { some: {} }
-                }
-            }),
-            prisma.item.aggregate({
-                where,
-                _avg: { rate: true }
-            })
-        ]);
-
-        res.json({
-            totalItems,
-            itemsUsedInInvoices,
-            itemsNotUsed: totalItems - itemsUsedInInvoices,
-            averageRate: averageRate._avg.rate || 0
-        });
-    } catch (error) {
-        next(error);
-    }
-});
 
 
 
