@@ -1,17 +1,17 @@
 
 import prisma from '../utils/prismaClient.js';
 
-export const generateInvoiceNumber = async (companyId) => {
+export const generateInvoiceNumber = async (companyProfileId) => {
     try {
         // Get or create settings for the company
         let settings = await prisma.settings.findUnique({
-            where: { companyId }
+            where: { companyProfileId }
         });
 
         if (!settings) {
             settings = await prisma.settings.create({
                 data: {
-                    companyId,
+                    companyProfileId,
                     invoicePrefix: 'INV',
                     nextInvoiceNumber: 1
                 }
@@ -22,7 +22,7 @@ export const generateInvoiceNumber = async (companyId) => {
 
         // Update next invoice number
         await prisma.settings.update({
-            where: { companyId },
+            where: { companyProfileId },
             data: {
                 nextInvoiceNumber: settings.nextInvoiceNumber + 1
             }

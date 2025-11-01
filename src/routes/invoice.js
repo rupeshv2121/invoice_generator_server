@@ -13,7 +13,6 @@ router.get('/', async (req, res, next) => {
             page = 1,
             limit = 10,
             status = '',
-            companyId,
             customerId,
             startDate,
             endDate
@@ -21,19 +20,23 @@ router.get('/', async (req, res, next) => {
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        // Build where clause
-        const where = {
-            company: {
-                userId: req.user.id
-            }
-        };
+        // Get user's company profile
+        const userCompany = await prisma.companyProfile.findFirst({
+            where: { userId: req.user.id },
+            select: { id: true }
+        });
 
-        if (companyId) {
-            where.companyId = parseInt(companyId);
+        if (!userCompany) {
+            return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
         }
 
+        // Build where clause - filter by user's company
+        const where = {
+            companyProfileId: userCompany.id
+        };
+
         if (customerId) {
-            where.customerId = parseInt(customerId);
+            where.customerId = customerId;
         }
 
         if (status) {
@@ -168,7 +171,7 @@ router.post('/', async (req, res, next) => {
 
         // Generate invoice number if not provided
         if (!invoiceData.invoiceNumber) {
-            invoiceData.invoiceNumber = await generateInvoiceNumber(invoiceData.companyId);
+            invoiceData.invoiceNumber = await generateInvoiceNumber(invoiceData.companyProfileId);
         }
 
         // Calculate totals
@@ -394,7 +397,7 @@ router.get('/stats', async (req, res, next) => {
         };
 
         if (companyId) {
-            where.companyId = parseInt(companyId);
+            where.companyProfileId = parseInt(companyId);
         }
 
         const [

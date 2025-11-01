@@ -13,7 +13,7 @@ const invoiceItemSchema = z.object({
 });
 
 export const invoiceSchema = z.object({
-    companyId: z.string().uuid().optional().or(z.literal('')).or(z.undefined()),
+    companyProfileId: z.string().uuid().optional().or(z.literal('')).or(z.undefined()),
     customerId: z.string().uuid('Customer ID is required'),
     invoiceNumber: z.string().optional(),
     invoiceDate: z.string().or(z.date()).transform((val) => new Date(val)),

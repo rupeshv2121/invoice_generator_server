@@ -10,15 +10,34 @@ export async function supabaseAuth(req, res, next) {
 
     try {
         const { data, error } = await supabase.auth.getUser(token);
-
-        // console.log('Token:', token);
-        // console.log('Supabase getUser data:', data, 'error:', error);
-
         if (error || !data.user) {
             return res.status(401).json({ error: 'Invalid or expired token' });
         }
-
         req.user = data.user;
+
+        // --- Auto-provision user in local User table if not present ---
+        try {
+            const prisma = (await import('../utils/prismaClient.js')).default;
+            const userId = data.user.id;
+            // Try to find user in local User table
+            let localUser = await prisma.user.findUnique({ where: { id: userId } });
+            if (!localUser) {
+                // Insert user with minimal info; adjust fields as needed
+                localUser = await prisma.user.create({
+                    data: {
+                        id: userId,
+                        authId: userId,
+                        role: 'user',
+                        createdAt: new Date(),
+                        updatedAt: new Date()
+                    }
+                });
+            }
+        } catch (provisionErr) {
+            console.error('User auto-provisioning error:', provisionErr);
+            // Optionally: return error here if you want to block login on DB issues
+        }
+
         next();
     } catch (err) {
         console.error('Auth middleware error:', err);

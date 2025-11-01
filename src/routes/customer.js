@@ -74,15 +74,21 @@ router.get('/', async (req, res, next) => {
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        // Build where clause
-        const where = {
-            isActive: true
-        };
+        // Get user's company profile
+        const userCompany = await prisma.companyProfile.findFirst({
+            where: { userId: req.user.id },
+            select: { id: true }
+        });
 
-        // Optionally filter by companyProfileId if user has a company
-        // Uncomment below if you want to filter by user's company
-        // const userCompany = await prisma.companyProfile.findFirst({ where: { userId: req.user.id }, select: { id: true } });
-        // if (userCompany) where.companyProfileId = userCompany.id;
+        if (!userCompany) {
+            return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
+        }
+
+        // Build where clause - filter by user's company
+        const where = {
+            isActive: true,
+            companyProfileId: userCompany.id
+        };
 
         if (search) {
             where.OR = [
@@ -178,16 +184,14 @@ router.post('/', async (req, res, next) => {
 
         const customerData = validation.data;
 
-        // Get user's company profile if exists
-        let companyProfileId = null;
-        try {
-            const userCompany = await prisma.companyProfile.findFirst({
-                where: { userId: req.user.id },
-                select: { id: true }
-            });
-            companyProfileId = userCompany?.id || null;
-        } catch (error) {
-            console.log("No company profile found for user:", req.user.id);
+        // Get user's company profile - now required
+        const userCompany = await prisma.companyProfile.findFirst({
+            where: { userId: req.user.id },
+            select: { id: true }
+        });
+
+        if (!userCompany) {
+            return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
         }
 
         // Create customer
@@ -205,7 +209,7 @@ router.post('/', async (req, res, next) => {
                 EximCode: customerData.EximCode,
                 gstin: customerData.gstin,
                 pan: customerData.pan,
-                companyProfileId: companyProfileId,
+                companyProfileId: userCompany.id, // Link to user's company
                 isActive: true
             },
             include: {

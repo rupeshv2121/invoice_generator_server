@@ -69,20 +69,26 @@ router.get('/', async (req, res, next) => {
         const {
             search = '',
             page = 1,
-            limit = 10,
-            companyId
+            limit = 10
         } = req.query;
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        // Build where clause
-        const where = {
-            isActive: true
-        };
+        // Get user's company profile
+        const userCompany = await prisma.companyProfile.findFirst({
+            where: { userId: req.user.id },
+            select: { id: true }
+        });
 
-        // if (companyId) {
-        //     where.companyId = parseInt(companyId);
-        // }
+        if (!userCompany) {
+            return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
+        }
+
+        // Build where clause - filter by user's company
+        const where = {
+            isActive: true,
+            companyProfileId: userCompany.id
+        };
 
         if (search) {
             where.OR = [
@@ -156,7 +162,15 @@ router.post('/', async (req, res, next) => {
 
         const { name, hsnCode, purchasePrice, sellingPrice, unit, cgstRate, sgstRate, igstRate, description } = validation.data;
 
-        // Company is optional, so we don't need to fetch or create it
+        // Get user's company profile
+        const userCompany = await prisma.companyProfile.findFirst({
+            where: { userId: req.user.id },
+            select: { id: true }
+        });
+
+        if (!userCompany) {
+            return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
+        }
 
         const newItem = await prisma.item.create({
             data: {
@@ -169,7 +183,7 @@ router.post('/', async (req, res, next) => {
                 cgstRate,
                 sgstRate,
                 igstRate,
-                companyId: null, // Company is optional
+                companyProfileId: userCompany.id, // Link to user's company
                 isActive: true
             }
         });

@@ -39,7 +39,7 @@ app.get('/health', (req, res) => {
 
 
 // app.use('/api/company', supabaseAuth, companyRoutes); // TEMPORARILY DISABLED AUTH FOR TESTING
-app.use('/api/company', companyRoutes); // <-- No auth for testing
+app.use('/api/company', supabaseAuth, companyRoutes);
 app.use('/api/customer', supabaseAuth, customerRoutes);
 app.use('/api/item', supabaseAuth, itemRoutes);
 app.use('/api/invoice', supabaseAuth, invoiceRoutes);
