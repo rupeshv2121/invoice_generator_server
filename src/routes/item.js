@@ -5,20 +5,31 @@ import prisma from '../utils/prismaClient.js';
 const router = express.Router();
 
 // Get item statistics
-// Get customer statistics
 router.get('/stats', async (req, res, next) => {
     try {
-        const where = { isActive: true };
+        // Get user's company profile
+        const userCompany = await prisma.companyProfile.findFirst({
+            where: { userId: req.user.id },
+            select: { id: true }
+        });
+
+        if (!userCompany) {
+            return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
+        }
+
+        const where = {
+            isActive: true,
+            companyProfileId: userCompany.id
+        };
 
         const [
-            totalCustomers,
-            newCustomersThisMonth,
-            customersWithInvoices,
-            gstRegisteredCount,
-            // outstandingAmountData
+            totalItems,
+            newItemsThisMonth,
+            lowStockItems,
+            averageSellingPrice
         ] = await Promise.all([
-            prisma.customer.count({ where }),
-            prisma.customer.count({
+            prisma.item.count({ where }),
+            prisma.item.count({
                 where: {
                     ...where,
                     createdAt: {
@@ -26,36 +37,21 @@ router.get('/stats', async (req, res, next) => {
                     }
                 }
             }),
-            prisma.customer.count({
-                where: {
-                    ...where,
-                    invoices: {
-                        some: {}
-                    }
+            // For now, return 0 since we don't have stock quantity field
+            Promise.resolve(0),
+            prisma.item.aggregate({
+                where,
+                _avg: {
+                    sellingPrice: true
                 }
-            }),
-            prisma.customer.count({
-                where: {
-                    ...where,
-                    // gstRegistered: true  // assuming this boolean column exists
-                }
-            }),
-            // prisma.invoice.aggregate({
-            //     _sum: {
-            //         balanceDue: true  // assuming your invoices table has a balanceDue field
-            //     }
-            // })
+            })
         ]);
 
-        // const outstandingAmount = outstandingAmountData._sum.balanceDue || 0;
-
         res.json({
-            totalCustomers,
-            newCustomersThisMonth,
-            customersWithInvoices,
-            customersWithoutInvoices: totalCustomers - customersWithInvoices,
-            gstRegisteredCount,
-            // outstandingAmount
+            totalItems,
+            newItemsThisMonth,
+            lowStockItems,
+            averageSellingPrice: averageSellingPrice._avg.sellingPrice || 0
         });
     } catch (error) {
         next(error);
@@ -93,8 +89,7 @@ router.get('/', async (req, res, next) => {
         if (search) {
             where.OR = [
                 { name: { contains: search, mode: 'insensitive' } },
-                { description: { contains: search, mode: 'insensitive' } },
-                { hsnCode: { contains: search, mode: 'insensitive' } }
+                { description: { contains: search, mode: 'insensitive' } }
             ];
         }
 
@@ -172,6 +167,22 @@ router.post('/', async (req, res, next) => {
             return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
         }
 
+        // Check if item with same name already exists for this company
+        const existingItem = await prisma.item.findFirst({
+            where: {
+                name: name.trim(),
+                companyProfileId: userCompany.id,
+                isActive: true
+            }
+        });
+
+        if (existingItem) {
+            return res.status(400).json({
+                success: false,
+                error: `Item with name "${name}" already exists. Please use a different name.`
+            });
+        }
+
         const newItem = await prisma.item.create({
             data: {
                 name,
@@ -220,6 +231,27 @@ router.patch('/:id', async (req, res, next) => {
 
         if (!existingItem) {
             return res.status(404).json({ error: 'Item not found' });
+        }
+
+        // If name is being updated, check for duplicates
+        if (validation.data.name && validation.data.name !== existingItem.name) {
+            const duplicateItem = await prisma.item.findFirst({
+                where: {
+                    name: validation.data.name.trim(),
+                    companyProfileId: existingItem.companyProfileId,
+                    isActive: true,
+                    NOT: {
+                        id: itemId
+                    }
+                }
+            });
+
+            if (duplicateItem) {
+                return res.status(400).json({
+                    success: false,
+                    error: `Item with name "${validation.data.name}" already exists. Please use a different name.`
+                });
+            }
         }
 
         const updatedItem = await prisma.item.update({
