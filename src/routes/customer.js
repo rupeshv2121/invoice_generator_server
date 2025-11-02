@@ -8,14 +8,26 @@ const router = express.Router();
 // Get customer statistics
 router.get('/stats', async (req, res, next) => {
     try {
-        const where = { isActive: true };
+        // Get user's company profile
+        const userCompany = await prisma.companyProfile.findFirst({
+            where: { userId: req.user.id },
+            select: { id: true }
+        });
+
+        if (!userCompany) {
+            return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
+        }
+
+        const where = {
+            isActive: true,
+            companyProfileId: userCompany.id
+        };
 
         const [
             totalCustomers,
             newCustomersThisMonth,
             customersWithInvoices,
-            gstRegisteredCount,
-            outstandingAmountData
+            gstRegisteredCount
         ] = await Promise.all([
             prisma.customer.count({ where }),
             prisma.customer.count({
@@ -34,28 +46,23 @@ router.get('/stats', async (req, res, next) => {
                     }
                 }
             }),
-            // prisma.customer.count({
-            //     where: {
-            //         ...where,
-            //         gstRegistered: true  // assuming this boolean column exists
-            //     }
-            // }),
-            // prisma.invoice.aggregate({
-            //     _sum: {
-            //         balanceDue: true  // assuming your invoices table has a balanceDue field
-            //     }
-            // })
+            prisma.customer.count({
+                where: {
+                    ...where,
+                    gstin: {
+                        not: null,
+                        not: ''
+                    }
+                }
+            })
         ]);
-
-        // const outstandingAmount = outstandingAmountData._sum.balanceDue || 0;
 
         res.json({
             totalCustomers,
             newCustomersThisMonth,
             customersWithInvoices,
             customersWithoutInvoices: totalCustomers - customersWithInvoices,
-            gstRegisteredCount,
-            // outstandingAmount
+            gstRegisteredCount
         });
     } catch (error) {
         next(error);
@@ -194,6 +201,22 @@ router.post('/', async (req, res, next) => {
             return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
         }
 
+        // Check if customer with same company name already exists for this company
+        const existingCustomer = await prisma.customer.findFirst({
+            where: {
+                companyName: customerData.companyName.trim(),
+                companyProfileId: userCompany.id,
+                isActive: true
+            }
+        });
+
+        if (existingCustomer) {
+            return res.status(400).json({
+                success: false,
+                error: `Customer with company name "${customerData.companyName}" already exists. Please use a different name.`
+            });
+        }
+
         // Create customer
         const customer = await prisma.customer.create({
             data: {
@@ -248,6 +271,27 @@ router.patch('/:id', async (req, res, next) => {
 
         if (!existingCustomer) {
             return res.status(404).json({ error: 'Customer not found' });
+        }
+
+        // If company name is being updated, check for duplicates
+        if (validation.data.companyName && validation.data.companyName !== existingCustomer.companyName) {
+            const duplicateCustomer = await prisma.customer.findFirst({
+                where: {
+                    companyName: validation.data.companyName.trim(),
+                    companyProfileId: existingCustomer.companyProfileId,
+                    isActive: true,
+                    NOT: {
+                        id: req.params.id
+                    }
+                }
+            });
+
+            if (duplicateCustomer) {
+                return res.status(400).json({
+                    success: false,
+                    error: `Customer with company name "${validation.data.companyName}" already exists. Please use a different name.`
+                });
+            }
         }
 
         const customer = await prisma.customer.update({
