@@ -5,7 +5,7 @@ const invoiceItemSchema = z.object({
     description: z.string().min(1, 'Description is required'),
     hsnCode: z.string().optional(),
     unit: z.string().default('pcs'),
-    quantity: z.number().int().positive('Quantity must be positive'),
+    quantity: z.number().positive('Quantity must be positive'),
     rate: z.number().positive('Rate must be positive'),
     cgstRate: z.number().min(0).max(50).default(9),
     sgstRate: z.number().min(0).max(50).default(9),

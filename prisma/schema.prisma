@@ -134,7 +134,7 @@ model InvoiceItem {
   description String
   hsnCode     String?
   unit        String  @default("pcs")
-  quantity    Int
+  quantity    Decimal @db.Decimal(10, 2)
   rate        Decimal @db.Decimal(10, 2)
   amount      Decimal @db.Decimal(12, 2)
   cgstRate    Decimal @default(9.00) @db.Decimal(5, 2)
