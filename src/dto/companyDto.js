@@ -11,6 +11,7 @@ export const companySchema = z.object({
     phone: z.string().optional(),
     email: z.string().email().optional().or(z.literal('')),
     website: z.string().optional(),
+    gstRegistered: z.boolean().default(false),
     gstin: z.string().optional(),
     pan: z.string().optional(),
     iecCode: z.string().optional(),
