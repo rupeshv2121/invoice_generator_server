@@ -1,5 +1,7 @@
 import express from 'express';
 import { validateInvoice, validateInvoiceUpdate } from '../dto/invoiceDto.js';
+import { checkInvoiceLimit, requireActiveSubscription } from '../middleware/subscriptionMiddleware.js';
+import SubscriptionService from '../services/subscriptionService.js';
 import { generateInvoiceNumber } from '../utils/invoiceUtils.js';
 import prisma from '../utils/prismaClient.js';
 
@@ -132,7 +134,7 @@ router.get('/:id', async (req, res, next) => {
 });
 
 // Create new invoice
-router.post('/', async (req, res, next) => {
+router.post('/', requireActiveSubscription, checkInvoiceLimit, async (req, res, next) => {
     try {
         const validation = validateInvoice(req.body);
         if (!validation.success) {
@@ -234,6 +236,9 @@ router.post('/', async (req, res, next) => {
                 }
             });
         });
+
+        // Increment invoice usage count
+        await SubscriptionService.incrementInvoiceUsage(req.user.id);
 
         res.status(201).json(invoice);
     } catch (error) {

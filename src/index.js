@@ -12,6 +12,7 @@ import customerRoutes from './routes/customer.js';
 import invoiceRoutes from './routes/invoice.js';
 import itemRoutes from './routes/item.js';
 import settingsRoutes from './routes/settings.js';
+import subscriptionRoutes from './routes/subscription.js';
 
 // Import middleware
 import { errorHandler } from './middleware/errorHandler.js';
@@ -44,6 +45,7 @@ app.use('/api/customer', supabaseAuth, customerRoutes);
 app.use('/api/item', supabaseAuth, itemRoutes);
 app.use('/api/invoice', supabaseAuth, invoiceRoutes);
 app.use('/api/settings', supabaseAuth, settingsRoutes);
+app.use('/api/subscription', supabaseAuth, subscriptionRoutes);
 
 // Error handling middleware
 app.use(errorHandler);

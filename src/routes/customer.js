@@ -179,10 +179,13 @@ router.get('/:id', async (req, res, next) => {
 // Create new customer
 router.post('/', async (req, res, next) => {
     try {
-        console.log("Incoming Customer Data:", req.body);
+        console.log("=== CREATE CUSTOMER REQUEST ===");
+        console.log("User ID:", req.user.id);
+        console.log("Request Body:", req.body);
 
         const validation = validateCustomer(req.body);
         if (!validation.success) {
+            console.log("Validation failed:", validation.error.errors);
             return res.status(400).json({
                 error: 'Validation failed',
                 details: validation.error.errors
@@ -190,14 +193,18 @@ router.post('/', async (req, res, next) => {
         }
 
         const customerData = validation.data;
+        console.log("Validated customer data:", customerData);
 
         // Get user's company profile - now required
         const userCompany = await prisma.companyProfile.findFirst({
             where: { userId: req.user.id },
-            select: { id: true }
+            select: { id: true, companyName: true }
         });
 
+        console.log("User company:", userCompany);
+
         if (!userCompany) {
+            console.log("Company profile not found for user:", req.user.id);
             return res.status(404).json({ error: 'Company profile not found. Please create a company profile first.' });
         }
 
@@ -211,6 +218,7 @@ router.post('/', async (req, res, next) => {
         });
 
         if (existingCustomer) {
+            console.log("Duplicate customer found:", existingCustomer);
             return res.status(400).json({
                 success: false,
                 error: `Customer with company name "${customerData.companyName}" already exists. Please use a different name.`
@@ -242,9 +250,15 @@ router.post('/', async (req, res, next) => {
             }
         });
 
+        console.log("Customer created successfully:", customer);
+        console.log("=== END CREATE CUSTOMER ===");
+
         res.status(201).json(customer);
     } catch (error) {
-        console.error("Create customer error:", error);
+        console.error("=== CREATE CUSTOMER ERROR ===");
+        console.error("Error:", error);
+        console.error("Error message:", error.message);
+        console.error("Error stack:", error.stack);
         next(error);
     }
 });
