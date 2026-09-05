@@ -143,7 +143,7 @@ router.get('/:id', async (req, res, next) => {
     try {
         const customer = await prisma.customer.findFirst({
             where: {
-                id: parseInt(req.params.id),
+                id: req.params.id,
                 company: {
                     userId: req.user.id
                 }

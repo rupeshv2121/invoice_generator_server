@@ -105,7 +105,7 @@ router.get('/:id', async (req, res, next) => {
     try {
         const invoice = await prisma.invoice.findFirst({
             where: {
-                id: parseInt(req.params.id),
+                id: req.params.id,
                 company: {
                     userId: req.user.id
                 }
@@ -260,7 +260,7 @@ router.put('/:id', async (req, res, next) => {
         // Check if invoice exists and belongs to user
         const existingInvoice = await prisma.invoice.findFirst({
             where: {
-                id: parseInt(req.params.id),
+                id: req.params.id,
                 company: {
                     userId: req.user.id
                 }
@@ -310,12 +310,12 @@ router.put('/:id', async (req, res, next) => {
             updatedInvoice = await prisma.$transaction(async (tx) => {
                 // Delete existing items
                 await tx.invoiceItem.deleteMany({
-                    where: { invoiceId: parseInt(req.params.id) }
+                    where: { invoiceId: req.params.id }
                 });
 
                 // Update invoice
                 const invoice = await tx.invoice.update({
-                    where: { id: parseInt(req.params.id) },
+                    where: { id: req.params.id },
                     data: {
                         ...invoiceData,
                         subtotal,
@@ -346,7 +346,7 @@ router.put('/:id', async (req, res, next) => {
         } else {
             // Just update invoice data without items
             updatedInvoice = await prisma.invoice.update({
-                where: { id: parseInt(req.params.id) },
+                where: { id: req.params.id },
                 data: invoiceData,
                 include: {
                     company: true,
@@ -368,7 +368,7 @@ router.delete('/:id', async (req, res, next) => {
         // Check if invoice exists and belongs to user
         const existingInvoice = await prisma.invoice.findFirst({
             where: {
-                id: parseInt(req.params.id),
+                id: req.params.id,
                 company: {
                     userId: req.user.id
                 }
@@ -381,7 +381,7 @@ router.delete('/:id', async (req, res, next) => {
 
         // Delete invoice and items (cascade delete will handle items)
         await prisma.invoice.delete({
-            where: { id: parseInt(req.params.id) }
+            where: { id: req.params.id }
         });
 
         res.json({ message: 'Invoice deleted successfully' });
@@ -402,7 +402,7 @@ router.get('/stats', async (req, res, next) => {
         };
 
         if (companyId) {
-            where.companyProfileId = parseInt(companyId);
+            where.companyProfileId = companyId;
         }
 
         const [

@@ -7,12 +7,12 @@ const router = express.Router();
 // Get settings for a company
 router.get('/:companyId', async (req, res, next) => {
     try {
-        const companyId = parseInt(req.params.companyId);
+        const companyProfileId = req.params.companyId;
 
         // Verify company belongs to user
-        const company = await prisma.company.findFirst({
+        const company = await prisma.companyProfile.findFirst({
             where: {
-                id: companyId,
+                id: companyProfileId,
                 userId: req.user.id
             }
         });
@@ -22,14 +22,14 @@ router.get('/:companyId', async (req, res, next) => {
         }
 
         let settings = await prisma.settings.findUnique({
-            where: { companyId }
+            where: { companyProfileId }
         });
 
         if (!settings) {
             // Create default settings
             settings = await prisma.settings.create({
                 data: {
-                    companyId,
+                    companyProfileId,
                     invoicePrefix: 'INV',
                     nextInvoiceNumber: 1,
                     defaultCgstRate: 9.00,
@@ -48,7 +48,7 @@ router.get('/:companyId', async (req, res, next) => {
 // Update settings
 router.put('/:companyId', async (req, res, next) => {
     try {
-        const companyId = parseInt(req.params.companyId);
+        const companyProfileId = req.params.companyId;
 
         const validation = validateSettings(req.body);
         if (!validation.success) {
@@ -59,9 +59,9 @@ router.put('/:companyId', async (req, res, next) => {
         }
 
         // Verify company belongs to user
-        const company = await prisma.company.findFirst({
+        const company = await prisma.companyProfile.findFirst({
             where: {
-                id: companyId,
+                id: companyProfileId,
                 userId: req.user.id
             }
         });
@@ -71,11 +71,11 @@ router.put('/:companyId', async (req, res, next) => {
         }
 
         const settings = await prisma.settings.upsert({
-            where: { companyId },
+            where: { companyProfileId },
             update: validation.data,
             create: {
                 ...validation.data,
-                companyId
+                companyProfileId
             }
         });
 

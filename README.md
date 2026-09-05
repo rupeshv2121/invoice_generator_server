@@ -1,1610 +1,686 @@
-# InvoicePro Backend API# Invoice Generator Server
+# InvoicePro — Backend API
 
+REST API for the InvoicePro invoicing platform: company profiles, customers, item
+catalogues, GST-aware invoice generation (CGST / SGST / IGST), reporting aggregates, and a
+subscription layer that gates invoice creation.
 
+Express 5 on Node.js (ESM), Prisma 6 over PostgreSQL, with authentication delegated to
+Supabase Auth.
 
-<div align="center">A comprehensive backend API for managing invoices, customers, items, and company profiles.
+> **Companion repository —** the React web client lives at
+> [rupeshv2121/invoice_generator](https://github.com/rupeshv2121/invoice_generator).
+> The two are deployed independently; this repo is the only one that talks to the database.
 
+---
 
+## Table of Contents
 
-![InvoicePro Backend](https://img.shields.io/badge/InvoicePro-Backend%20API-4F46E5?style=for-the-badge&logo=node.js&logoColor=white)## Features
-
-
-
-[![Node.js](https://img.shields.io/badge/Node.js-18.x-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)- 🔐 JWT-based authentication
-
-[![Express](https://img.shields.io/badge/Express-4.x-000000?style=flat-square&logo=express&logoColor=white)](https://expressjs.com/)- 🏢 Multi-company support
-
-[![Prisma](https://img.shields.io/badge/Prisma-6.x-2D3748?style=flat-square&logo=prisma&logoColor=white)](https://www.prisma.io/)- 👥 Customer management with search
-
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)- 📦 Items/Products management
-
-- 🧾 Invoice creation with automatic calculations
-
-*Robust REST API with subscription management, GST compliance, and real-time analytics for invoice generation.*- 📊 Dashboard and reporting APIs
-
-- 🔍 Advanced search and filtering
-
-[Frontend Repo](../invoice_generator) • [API Documentation](#api-documentation) • [Database Schema](#database-schema)- 📈 Revenue and GST reports
-
-
-
-</div>## Technology Stack
-
-
-
----- **Node.js** with ES Modules
-
-- **Express.js** - Web framework
-
-## 📋 Table of Contents- **Prisma** - Database ORM
-
-- **MySQL** - Database
-
-- [Overview](#overview)- **JWT** - Authentication
-
-- [Key Features](#key-features)- **Zod** - Input validation
-
-- [Tech Stack](#tech-stack)- **bcrypt** - Password hashing
-
+- [System Architecture](#system-architecture)
+- [Stack](#stack)
+- [Project Structure](#project-structure)
 - [Getting Started](#getting-started)
+- [Environment Variables](#environment-variables)
+- [Scripts](#scripts)
+- [Request Lifecycle](#request-lifecycle)
+- [Authentication](#authentication)
+- [Subscription Layer](#subscription-layer)
+- [Database Schema](#database-schema)
+- [API Reference](#api-reference)
+- [Core Pipelines](#core-pipelines)
+- [Validation](#validation)
+- [Error Handling](#error-handling)
+- [Deployment](#deployment)
+- [Known Gaps](#known-gaps)
 
-- [Database Schema](#database-schema)## Quick Start
+---
 
-- [API Documentation](#api-documentation)
+## System Architecture
 
-- [Middleware](#middleware)### 1. Clone and Install Dependencies
+Three tiers, plus Supabase as an external identity provider. This API is the only component
+that holds a database credential; the browser never does.
 
-- [Services](#services)
+```mermaid
+flowchart TB
+    subgraph Client["Web client (separate repo)"]
+        UI["React SPA — Vite, Tailwind"]
+        AXIOS["axios + Bearer JWT"]
+        UI --> AXIOS
+    end
 
-- [Environment Variables](#environment-variables)```bash
+    subgraph Supabase["Supabase (managed)"]
+        SBAUTH["Auth — users, JWT issuance"]
+        SBPG[("PostgreSQL")]
+    end
 
-- [Scripts](#scripts)cd invoice_generator_server
+    subgraph Server["This repository — Express 5 API"]
+        MW["Middleware: CORS, JSON, cookies"]
+        AUTH["supabaseAuth — token verify + user auto-provision"]
+        SUBMW["Subscription guards"]
+        ROUTES["Routers: auth, company, customer, item,<br/>invoice, settings, subscription"]
+        DTO["Zod DTO validation"]
+        SVC["SubscriptionService / invoiceUtils"]
+        ERR["errorHandler"]
+        MW --> AUTH --> SUBMW --> ROUTES --> DTO --> SVC
+        ROUTES --> ERR
+    end
 
-- [Deployment](#deployment)npm install
+    AXIOS -- "HTTPS + Bearer JWT" --> MW
+    ROUTES -- "admin + token APIs" --> SBAUTH
+    AUTH -- "getUser(token)" --> SBAUTH
+    SVC -- "Prisma Client" --> SBPG
+    ROUTES -- "Prisma Client" --> SBPG
+```
 
+**Design notes**
+
+- **Supabase Auth is the identity source of truth.** This API stores only a thin `User` row
+  keyed by the Supabase user id (`authId`); passwords never touch these tables.
+- **`CompanyProfile` is the tenancy boundary.** Customers, items, invoices, and settings all
+  hang off a company profile, and list queries are scoped through it, so one user does not
+  see another's data.
+- **Money is `Decimal`, not float.** Amounts use `DECIMAL(12,2)` and tax rates
+  `DECIMAL(5,2)` to avoid rounding drift.
+- **Invoice writes are transactional.** Header and line items are created in a single
+  `prisma.$transaction`, so a half-written invoice is not possible.
+- **The server never trusts client-supplied totals.** Every amount is recomputed on write.
+
+---
+
+## Stack
+
+| Concern | Choice |
+| --- | --- |
+| Runtime | Node.js 18+, ES modules (`"type": "module"`) |
+| Framework | Express 5 |
+| ORM | Prisma 6 (`prisma-client-js`) |
+| Database | PostgreSQL (Supabase-hosted) |
+| Auth | Supabase Auth (`@supabase/supabase-js`), bearer JWT |
+| Validation | Zod 4 |
+| Misc | `cors`, `cookie-parser`, `dotenv`, `bcrypt`, `jsonwebtoken`, `axios` |
+
+---
+
+## Project Structure
+
+```
+invoice_generator_server/
+├── prisma/
+│   ├── schema.prisma              # single source of truth for the data model
+│   └── migrations/                # 14 ordered migrations
+├── src/
+│   ├── index.js                   # app bootstrap, middleware chain, route mounting
+│   ├── routes/
+│   │   ├── auth.js                # register, login, me
+│   │   ├── company.js             # company profile CRUD
+│   │   ├── customer.js            # customer CRUD, stats
+│   │   ├── item.js                # item catalogue CRUD, stats, autocomplete
+│   │   ├── invoice.js             # invoice CRUD (subscription-gated create)
+│   │   ├── settings.js            # per-company settings + reporting endpoints
+│   │   └── subscription.js        # plans, trial, status, cancel
+│   ├── middleware/
+│   │   ├── auth.js                # supabaseAuth, requireRole
+│   │   ├── subscriptionMiddleware.js
+│   │   └── errorHandler.js
+│   ├── services/
+│   │   └── subscriptionService.js # plan catalogue, limits, lifecycle
+│   ├── dto/                       # Zod schemas per resource
+│   ├── utils/
+│   │   ├── prismaClient.js
+│   │   ├── supabaseClient.js
+│   │   └── invoiceUtils.js        # numbering, totals, currency formatting
+│   └── generated/prisma/          # committed Prisma Client output
+└── vercel.json                    # all routes → src/index.js via @vercel/node
 ```
 
 ---
 
-### 2. Environment Setup
+## Getting Started
 
-## 🎯 Overview
-
-```bash
-
-**InvoicePro Backend API** is the server-side application powering the InvoicePro invoice management system. Built with Node.js, Express, and Prisma ORM, it provides a robust REST API for invoice creation, customer management, subscription handling, and GST compliance calculations.# Copy environment file
-
-cp .env.example .env
-
-### Core Responsibilities
-
-# Edit .env with your database credentials
-
-- ✅ **Authentication**: Validate Supabase JWT tokens and manage user sessions# DATABASE_URL="mysql://username:password@localhost:3306/invoice_generator"
-
-- ✅ **Subscription Management**: Trial creation, plan upgrades, usage tracking```
-
-- ✅ **Invoice CRUD**: Create, read, update, delete invoices with GST calculations
-
-- ✅ **Customer Management**: Store and manage customer data with GST details### 3. Database Setup
-
-- ✅ **Items Catalog**: Product/service inventory management
-
-- ✅ **Dashboard Analytics**: Real-time metrics, charts, and reports```bash
-
-- ✅ **Access Control**: Middleware-based authorization and usage limits# Generate Prisma client
-
-- ✅ **Database Operations**: Prisma ORM with PostgreSQLnpm run db:generate
-
-
-
----# Push schema to database (for development)
-
-npm run db:push
-
-## ✨ Key Features
-
-# OR run migrations (for production)
-
-### 🔐 Authentication & Authorizationnpm run db:migrate
-
-- **Supabase JWT Validation**: Middleware to verify JWT tokens on protected routes```
-
-- **User Extraction**: Automatic user extraction from `Authorization` header
-
-- **Session Management**: Stateless JWT-based authentication### 4. Start the Server
-
-- **CORS Enabled**: Configured for cross-origin requests from frontend
+**Prerequisites:** Node.js 18+, a PostgreSQL database, and a Supabase project (its Auth
+service is required regardless of where Postgres lives).
 
 ```bash
-
-### 💳 Subscription System# Development mode (with auto-restart)
-
-- **Automated Trial Creation**: Creates 7-day trial on user setup completionnpm run dev
-
-- **Plan Management**: CRUD operations for subscription plans
-
-- **Usage Tracking**: Real-time counters for invoices, customers, items# Production mode
-
-- **Limit Enforcement**: Middleware blocks requests when limits are exceedednpm start
-
-- **Subscription Status**: Active, expired, canceled, trial states```
-
-- **Payment Integration Ready**: Razorpay/Stripe integration prepared
-
-The server will start on `http://localhost:3001`
-
-### 📄 Invoice Management
-
-- **Invoice CRUD**: Full lifecycle management from creation to deletion## API Endpoints
-
-- **GST Auto-calculation**: CGST, SGST, IGST based on customer state
-
-- **PDF Export**: Integration with frontend PDF service### Authentication
-
-- **Status Management**: Draft, sent, paid, overdue, canceled- `POST /api/auth/register` - Register new user
-
-- **Invoice Numbers**: Auto-increment with custom prefix support- `POST /api/auth/login` - Login user
-
-- **Bulk Operations**: Filter, search, pagination support- `GET /api/auth/me` - Get current user
-
-- `POST /api/auth/refresh` - Refresh token
-
-### 👥 Customer Management
-
-- **Customer CRUD**: Complete customer data management### Company Management
-
-- **GST Details**: GSTIN, PAN, state for tax calculations- `GET /api/company` - Get all companies
-
-- **Purchase History**: Track total invoices and revenue per customer- `POST /api/company` - Create company
-
-- **Validation**: GSTIN format validation, duplicate checks- `GET /api/company/:id` - Get company by ID
-
-- **Soft Delete**: Mark customers as inactive instead of hard delete- `PUT /api/company/:id` - Update company
-
-- `DELETE /api/company/:id` - Delete company
-
-### 📦 Items/Products Management- `GET /api/company/profile/main` - Get main company profile
-
-- **Item Catalog**: Manage products and services database
-
-- **Pricing Control**: Rate, tax rate, HSN/SAC codes, units### Customer Management
-
-- **Reusable Templates**: Items can be quickly added to invoices- `GET /api/customer` - Get customers (with search & pagination)
-
-- **Stock Tracking**: Quantity management (optional feature)- `POST /api/customer` - Create customer
-
-- `GET /api/customer/:id` - Get customer by ID
-
-### 📊 Analytics & Reporting- `PUT /api/customer/:id` - Update customer
-
-- **Dashboard Metrics**: Total revenue, invoices, customers, pending payments- `DELETE /api/customer/:id` - Delete customer
-
-- **Monthly Revenue**: Aggregated data for charts- `GET /api/customer/stats/overview` - Get customer statistics
-
-- **GST Summary**: CGST, SGST, IGST breakdown
-
-- **Customer Analytics**: Top customers by revenue### Items Management
-
-- **Payment Reminders**: Overdue invoice tracking- `GET /api/item` - Get items (with search & pagination)
-
-- `POST /api/item` - Create item
-
----- `GET /api/item/:id` - Get item by ID
-
-- `PUT /api/item/:id` - Update item
-
-## 🛠️ Tech Stack- `DELETE /api/item/:id` - Delete item
-
-- `GET /api/item/search/autocomplete` - Search items for autocomplete
-
-### Runtime & Framework- `GET /api/item/stats/overview` - Get item statistics
-
-- **Node.js 18.x** - JavaScript runtime
-
-- **Express 4.x** - Web application framework### Invoice Management
-
-- **CORS** - Cross-origin resource sharing middleware- `GET /api/invoice` - Get invoices (with filtering & pagination)
-
-- **dotenv** - Environment variable management- `POST /api/invoice` - Create invoice
-
-- `GET /api/invoice/:id` - Get invoice by ID
-
-### Database & ORM- `PUT /api/invoice/:id` - Update invoice
-
-- **PostgreSQL 14+** - Relational database- `DELETE /api/invoice/:id` - Delete invoice
-
-- **Prisma 6.17.1** - Next-generation ORM- `GET /api/invoice/stats/overview` - Get invoice statistics
-
-  - Type-safe database client
-
-  - Automatic migrations### Settings & Reports
-
-  - Schema management- `GET /api/settings/:companyId` - Get company settings
-
-  - Query builder- `PUT /api/settings/:companyId` - Update company settings
-
-- `GET /api/settings/reports/dashboard` - Get dashboard data
-
-### Authentication- `GET /api/settings/reports/revenue` - Get revenue reports
-
-- **@supabase/supabase-js** - Supabase client SDK- `GET /api/settings/reports/gst` - Get GST reports
-
-- **JWT Tokens** - JSON Web Token validation
-
-- **Bearer Authentication** - Standard token format## Database Schema
-
-
-
-### Development Tools### Key Models
-
-- **Nodemon** - Auto-restart on file changes
-
-- **ESLint** - Code linting (optional)- **User** - System users with authentication
-
-- **Prisma Studio** - Database GUI for development- **Company** - Business entities with complete profile
-
-- **Customer** - Customer information with GST details
-
----- **Item** - Products/services with pricing and tax rates
-
-- **Invoice** - Invoice headers with customer and company info
-
-## 🚀 Getting Started- **InvoiceItem** - Invoice line items with calculations
-
-- **Settings** - Company-specific settings and preferences
-
-### Prerequisites
-
-## Development Scripts
-
-- **Node.js** (v18 or higher) - [Download](https://nodejs.org/)
-
-- **PostgreSQL** (v14 or higher) - [Download](https://www.postgresql.org/download/)```bash
-
-- **npm** or **yarn** - Package manager# Start development server with auto-restart
-
-- **Supabase account** - [Sign up](https://supabase.com/)npm run dev
-
-
-
-### Installation# Generate Prisma client after schema changes
-
-npm run db:generate
-
-1. **Clone the repository**
-
-   ```bash# Push schema changes to database
-
-   git clone https://github.com/rupeshv2121/invoice_generator_server.gitnpm run db:push
-
-   cd invoice_generator_server
-
-   ```# Run database migrations
-
-npm run db:migrate
-
-2. **Install dependencies**
-
-   ```bash# Open Prisma Studio (database GUI)
-
-   npm installnpm run db:studio
-
-   ``````
-
-
-
-3. **Install Prisma dependencies**## Example API Usage
-
-   ```bash
-
-   cd prisma### Register and Login
-
-   npm install```javascript
-
-   cd ..// Register
-
-   ```const response = await fetch('/api/auth/register', {
-
-    method: 'POST',
-
-4. **Configure environment variables**    headers: { 'Content-Type': 'application/json' },
-
-       body: JSON.stringify({
-
-   Create a `.env` file in the root directory:        email: 'user@example.com',
-
-   ```env        password: 'password123',
-
-   # Database Connection        name: 'John Doe'
-
-   DATABASE_URL="postgresql://username:password@localhost:5432/invoice_db?schema=public"    })
-
-});
-
-   # Server Configuration
-
-   PORT=3001// Login
-
-   NODE_ENV=developmentconst loginResponse = await fetch('/api/auth/login', {
-
-    method: 'POST',
-
-   # Supabase Configuration    headers: { 'Content-Type': 'application/json' },
-
-   SUPABASE_URL=your_supabase_project_url    body: JSON.stringify({
-
-   SUPABASE_ANON_KEY=your_supabase_anon_key        email: 'user@example.com',
-
-   SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key        password: 'password123'
-
-    })
-
-   # Frontend URL (for CORS)});
-
-   FRONTEND_URL=http://localhost:5173const { token } = await loginResponse.json();
-
+git clone https://github.com/rupeshv2121/invoice_generator_server.git
+cd invoice_generator_server
+npm install
+# create .env — see Environment Variables below
+npm run db:generate        # generate Prisma Client into src/generated/prisma
+npm run db:migrate         # apply migrations to your database
+npm run dev                # watch mode on http://localhost:3001
 ```
 
-   # JWT Secret (optional, if using custom JWT)
-
-   JWT_SECRET=your_jwt_secret_here### Create Invoice
-
-   ``````javascript
-
-const invoice = await fetch('/api/invoice', {
-
-5. **Setup PostgreSQL Database**    method: 'POST',
-
-    headers: {
-
-   **Option A: Using Local PostgreSQL**        'Content-Type': 'application/json',
-
-   ```bash        'Authorization': `Bearer ${token}`
-
-   # Create database    },
-
-   createdb invoice_db    body: JSON.stringify({
-
-        companyId: 1,
-
-   # Or using psql        customerId: 1,
-
-   psql -U postgres        invoiceDate: '2025-01-01',
-
-   CREATE DATABASE invoice_db;        invoiceItems: [
-
-   \q            {
-
-   ```                description: 'Product 1',
-
-                quantity: 2,
-
-   **Option B: Using Docker**                rate: 100.00,
-
-   ```bash                hsnCode: '12345'
-
-   docker run --name invoice-postgres -e POSTGRES_PASSWORD=mysecretpassword -e POSTGRES_DB=invoice_db -p 5432:5432 -d postgres:14            }
-
-   ```        ]
-
-    })
-
-6. **Run Prisma Migrations**});
-
-   ```bash```
-
-   npx prisma migrate dev --name init
-
-   ```## Error Handling
-
-
-
-   This will:The API uses consistent error responses:
-
-   - Create all database tables
-
-   - Generate Prisma Client```json
-
-   - Apply the schema to your database{
-
-    "error": "Error type",
-
-7. **Generate Prisma Client**    "message": "Human readable message",
-
-   ```bash    "details": ["Validation errors if any"]
-
-   npx prisma generate}
-
-   ``````
-
-
-
-8. **Seed Database (Optional)**## Security Features
-
-   ```bash
-
-   # Create seed data for testing- JWT token authentication
-
-   npx prisma db seed- Password hashing with bcrypt
-
-   ```- Input validation with Zod
-
-- SQL injection prevention with Prisma
-
-9. **Start the server**- CORS configuration
-
-- Environment variable protection
-
-   **Development mode (with auto-restart):**
-
-   ```bash## Production Deployment
-
-   npm run dev
-
-   ```1. Set `NODE_ENV=production` in environment
-
-2. Use strong JWT secret
-
-   **Production mode:**3. Configure proper CORS origins
-
-   ```bash4. Set up database backup
-
-   npm start5. Use process manager (PM2)
-
-   ```6. Configure reverse proxy (Nginx)
-
-
-
-10. **Verify server is running**## Contributing
-
-    ```
-
-    Server running on http://localhost:30011. Follow existing code structure
-
-    ```2. Add validation for new endpoints
-
-3. Include proper error handling
-
-### Quick Testing4. Update this README for new features
-
-Test the API with cURL or Postman:
+Smoke test:
 
 ```bash
-# Health check (no auth required)
 curl http://localhost:3001/health
-
-# Get subscription (requires auth token)
-curl -H "Authorization: Bearer YOUR_JWT_TOKEN" http://localhost:3001/api/subscription/current
+# {"status":"OK","message":"Invoice Generator Server is running!"}
 ```
+
+To run the full stack locally, clone the client repo alongside this one, point its
+`VITE_API_URL` at `http://localhost:3001`, and set `FRONTEND_URL` here to the client origin.
 
 ---
 
-## 🗄️ Database Schema
+## Environment Variables
 
-### Prisma Schema Overview
-
-The database uses Prisma ORM with PostgreSQL. Here's the complete schema:
-
-```prisma
-// User Model (managed by Supabase Auth)
-model User {
-  id            String         @id @default(uuid())
-  email         String         @unique
-  name          String?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  
-  // Relations
-  companies     Company[]
-  customers     Customer[]
-  items         Item[]
-  invoices      Invoice[]
-  subscription  Subscription?
-  payments      Payment[]
-}
-
-// Company Profile
-model Company {
-  id              String    @id @default(uuid())
-  userId          String
-  companyName     String
-  phone           String?
-  email           String?
-  website         String?
-  address         String?
-  city            String?
-  state           String?
-  pincode         String?
-  country         String?
-  gstin           String?   @unique
-  pan             String?
-  arn             String?
-  iec             String?
-  bankName        String?
-  accountNumber   String?
-  ifscCode        String?
-  branch          String?
-  logoUrl         String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  invoices        Invoice[]
-  
-  @@index([userId])
-}
-
-// Customer Model
-model Customer {
-  id              String    @id @default(uuid())
-  userId          String
-  customerName    String
-  companyName     String?
-  phone           String?
-  email           String?
-  address         String?
-  city            String?
-  state           String?
-  pincode         String?
-  country         String?
-  gstin           String?
-  pan             String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  invoices        Invoice[]
-  
-  @@index([userId])
-}
-
-// Item/Product Model
-model Item {
-  id              String        @id @default(uuid())
-  userId          String
-  itemName        String
-  description     String?
-  hsnCode         String?
-  rate            Float
-  taxRate         Float         @default(18.0)
-  unit            String        @default("nos")
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  
-  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  invoiceItems    InvoiceItem[]
-  
-  @@index([userId])
-}
-
-// Invoice Model
-model Invoice {
-  id              String        @id @default(uuid())
-  userId          String
-  companyId       String
-  customerId      String
-  invoiceNumber   String
-  invoiceDate     DateTime
-  dueDate         DateTime?
-  placeOfSupply   String?
-  status          InvoiceStatus @default(DRAFT)
-  subtotal        Float
-  cgst            Float         @default(0)
-  sgst            Float         @default(0)
-  igst            Float         @default(0)
-  totalTax        Float
-  grandTotal      Float
-  notes           String?
-  terms           String?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  
-  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  company         Company       @relation(fields: [companyId], references: [id])
-  customer        Customer      @relation(fields: [customerId], references: [id])
-  items           InvoiceItem[]
-  
-  @@unique([userId, invoiceNumber])
-  @@index([userId])
-  @@index([status])
-}
-
-// Invoice Line Items
-model InvoiceItem {
-  id              String    @id @default(uuid())
-  invoiceId       String
-  itemId          String?
-  description     String
-  hsnCode         String?
-  quantity        Float
-  unit            String
-  rate            Float
-  amount          Float
-  taxRate         Float
-  taxAmount       Float
-  totalAmount     Float
-  
-  invoice         Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  item            Item?     @relation(fields: [itemId], references: [id])
-  
-  @@index([invoiceId])
-}
-
-// Subscription Model
-model Subscription {
-  id              String             @id @default(uuid())
-  userId          String             @unique
-  plan            SubscriptionPlan   @default(FREE)
-  status          SubscriptionStatus @default(TRIAL)
-  startDate       DateTime           @default(now())
-  endDate         DateTime?
-  trialEndsAt     DateTime?
-  invoicesUsed    Int                @default(0)
-  invoicesLimit   Int
-  customersLimit  Int
-  itemsLimit      Int
-  createdAt       DateTime           @default(now())
-  updatedAt       DateTime           @updatedAt
-  
-  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  @@index([userId])
-  @@index([status])
-}
-
-// Payment Model (for subscription payments)
-model Payment {
-  id              String        @id @default(uuid())
-  userId          String
-  amount          Float
-  currency        String        @default("INR")
-  status          PaymentStatus @default(PENDING)
-  paymentMethod   String?
-  transactionId   String?       @unique
-  razorpayOrderId String?
-  razorpayPaymentId String?
-  razorpaySignature String?
-  metadata        Json?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
-  
-  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  @@index([userId])
-  @@index([status])
-}
-
-// Enums
-enum InvoiceStatus {
-  DRAFT
-  SENT
-  PAID
-  OVERDUE
-  CANCELLED
-}
-
-enum SubscriptionPlan {
-  FREE
-  BASIC
-  PROFESSIONAL
-  ENTERPRISE
-}
-
-enum SubscriptionStatus {
-  TRIAL
-  ACTIVE
-  EXPIRED
-  CANCELLED
-}
-
-enum PaymentStatus {
-  PENDING
-  SUCCESS
-  FAILED
-  REFUNDED
-}
-```
-
-### Entity Relationships
-
-```
-User (1) ─── (many) Company
-User (1) ─── (many) Customer
-User (1) ─── (many) Item
-User (1) ─── (many) Invoice
-User (1) ─── (1) Subscription
-User (1) ─── (many) Payment
-
-Company (1) ─── (many) Invoice
-Customer (1) ─── (many) Invoice
-
-Invoice (1) ─── (many) InvoiceItem
-Item (1) ─── (many) InvoiceItem (optional)
-```
-
-### Database Migrations
-
-```bash
-# Create a new migration
-npx prisma migrate dev --name your_migration_name
-
-# Apply pending migrations
-npx prisma migrate deploy
-
-# Reset database (CAUTION: Deletes all data)
-npx prisma migrate reset
-
-# View migration status
-npx prisma migrate status
-
-# Generate Prisma Client after schema changes
-npx prisma generate
-
-# Open Prisma Studio (database GUI)
-npx prisma studio
-```
-
----
-
-## 📡 API Documentation
-
-### Base URL
-```
-http://localhost:3001/api
-```
-
-### Authentication
-
-All protected routes require a JWT token in the `Authorization` header:
-
-```
-Authorization: Bearer <your_jwt_token>
-```
-
----
-
-### 🔐 Authentication Endpoints
-
-#### Verify Token
-```http
-GET /api/auth/verify
-```
-**Purpose**: Verify if the provided JWT token is valid  
-**Auth**: Required  
-**Response**:
-```json
-{
-  "valid": true,
-  "user": {
-    "id": "uuid",
-    "email": "user@example.com"
-  }
-}
-```
-
----
-
-### 💳 Subscription Endpoints
-
-#### Get Current Subscription
-```http
-GET /api/subscription/current
-```
-**Purpose**: Get the logged-in user's subscription details  
-**Auth**: Required  
-**Response**:
-```json
-{
-  "id": "uuid",
-  "userId": "uuid",
-  "plan": "BASIC",
-  "status": "ACTIVE",
-  "startDate": "2024-01-01T00:00:00.000Z",
-  "endDate": "2024-02-01T00:00:00.000Z",
-  "invoicesUsed": 25,
-  "invoicesLimit": 100,
-  "customersLimit": 200,
-  "itemsLimit": 500
-}
-```
-
-#### Get All Plans
-```http
-GET /api/subscription/plans
-```
-**Purpose**: Get all available subscription plans with features  
-**Auth**: Not required  
-**Response**:
-```json
-[
-  {
-    "name": "FREE",
-    "price": 0,
-    "currency": "INR",
-    "duration": "7 days",
-    "invoicesLimit": 10,
-    "customersLimit": 50,
-    "itemsLimit": 100,
-    "features": ["GST Compliance", "PDF Exports"]
-  },
-  {
-    "name": "BASIC",
-    "price": 499,
-    "currency": "INR",
-    "duration": "monthly",
-    "invoicesLimit": 100,
-    "customersLimit": 200,
-    "itemsLimit": 500,
-    "features": ["All FREE features", "Email Support"]
-  }
-]
-```
-
-#### Create Trial Subscription
-```http
-POST /api/subscription/trial
-```
-**Purpose**: Create a 7-day trial subscription for a new user  
-**Auth**: Required  
-**Request Body**: None  
-**Response**:
-```json
-{
-  "message": "Trial subscription created successfully",
-  "subscription": {
-    "id": "uuid",
-    "plan": "FREE",
-    "status": "TRIAL",
-    "trialEndsAt": "2024-01-08T00:00:00.000Z",
-    "invoicesLimit": 10
-  }
-}
-```
-
-#### Check Subscription Status
-```http
-GET /api/subscription/status
-```
-**Purpose**: Check if user has an active subscription  
-**Auth**: Required  
-**Response**:
-```json
-{
-  "hasActiveSubscription": true,
-  "daysRemaining": 25,
-  "isTrialActive": false,
-  "isExpiringSoon": false
-}
-```
-
----
-
-### 🏢 Company Endpoints
-
-#### Get User's Company Profile
-```http
-GET /api/my-company
-```
-**Auth**: Required  
-**Response**:
-```json
-{
-  "id": "uuid",
-  "companyName": "ABC Pvt Ltd",
-  "phone": "+91 9876543210",
-  "email": "abc@example.com",
-  "gstin": "29ABCDE1234F1Z5",
-  "pan": "ABCDE1234F",
-  "bankName": "HDFC Bank",
-  "accountNumber": "1234567890",
-  "ifscCode": "HDFC0001234"
-}
-```
-
-#### Create/Update Company Profile
-```http
-POST /api/my-company
-PUT /api/my-company/:id
-```
-**Auth**: Required  
-**Request Body**:
-```json
-{
-  "companyName": "ABC Pvt Ltd",
-  "phone": "+91 9876543210",
-  "email": "abc@example.com",
-  "address": "123 Main St",
-  "city": "Mumbai",
-  "state": "Maharashtra",
-  "pincode": "400001",
-  "gstin": "29ABCDE1234F1Z5",
-  "pan": "ABCDE1234F",
-  "bankName": "HDFC Bank",
-  "accountNumber": "1234567890",
-  "ifscCode": "HDFC0001234"
-}
-```
-
----
-
-### 👥 Customer Endpoints
-
-#### Get All Customers
-```http
-GET /api/customers
-```
-**Auth**: Required  
-**Query Params**:
-- `page` (optional): Page number (default: 1)
-- `limit` (optional): Items per page (default: 50)
-- `search` (optional): Search by name/company/GSTIN
-
-**Response**:
-```json
-{
-  "customers": [
-    {
-      "id": "uuid",
-      "customerName": "John Doe",
-      "companyName": "XYZ Corp",
-      "phone": "+91 9876543210",
-      "email": "john@xyzcorp.com",
-      "gstin": "27XYZAB1234C1Z5",
-      "state": "Karnataka"
-    }
-  ],
-  "total": 150,
-  "page": 1,
-  "totalPages": 3
-}
-```
-
-#### Create Customer
-```http
-POST /api/customers
-```
-**Auth**: Required + Subscription Limit Check  
-**Request Body**:
-```json
-{
-  "customerName": "John Doe",
-  "companyName": "XYZ Corp",
-  "phone": "+91 9876543210",
-  "email": "john@xyzcorp.com",
-  "address": "456 Park Ave",
-  "city": "Bangalore",
-  "state": "Karnataka",
-  "pincode": "560001",
-  "gstin": "27XYZAB1234C1Z5"
-}
-```
-
-#### Update Customer
-```http
-PUT /api/customers/:id
-```
-**Auth**: Required  
-**Request Body**: Same as create
-
-#### Delete Customer
-```http
-DELETE /api/customers/:id
-```
-**Auth**: Required  
-**Response**:
-```json
-{
-  "message": "Customer deleted successfully"
-}
-```
-
----
-
-### 📦 Item Endpoints
-
-#### Get All Items
-```http
-GET /api/items
-```
-**Auth**: Required  
-**Response**:
-```json
-[
-  {
-    "id": "uuid",
-    "itemName": "Web Development Service",
-    "description": "Full-stack web development",
-    "hsnCode": "998314",
-    "rate": 50000,
-    "taxRate": 18,
-    "unit": "hours"
-  }
-]
-```
-
-#### Create Item
-```http
-POST /api/items
-```
-**Auth**: Required + Subscription Limit Check  
-**Request Body**:
-```json
-{
-  "itemName": "Web Development Service",
-  "description": "Full-stack web development",
-  "hsnCode": "998314",
-  "rate": 50000,
-  "taxRate": 18,
-  "unit": "hours"
-}
-```
-
-#### Update Item
-```http
-PUT /api/items/:id
-```
-**Auth**: Required
-
-#### Delete Item
-```http
-DELETE /api/items/:id
-```
-**Auth**: Required
-
----
-
-### 📄 Invoice Endpoints
-
-#### Get All Invoices
-```http
-GET /api/invoices
-```
-**Auth**: Required  
-**Query Params**:
-- `page`, `limit`, `search`
-- `status`: Filter by status (DRAFT, SENT, PAID, OVERDUE)
-- `startDate`, `endDate`: Date range filter
-
-**Response**:
-```json
-{
-  "invoices": [
-    {
-      "id": "uuid",
-      "invoiceNumber": "INV-001",
-      "invoiceDate": "2024-01-15",
-      "dueDate": "2024-02-15",
-      "status": "PAID",
-      "customer": {
-        "customerName": "John Doe",
-        "companyName": "XYZ Corp"
-      },
-      "subtotal": 50000,
-      "totalTax": 9000,
-      "grandTotal": 59000
-    }
-  ],
-  "total": 250,
-  "page": 1
-}
-```
-
-#### Create Invoice
-```http
-POST /api/invoices
-```
-**Auth**: Required + Subscription Limit Check  
-**Request Body**:
-```json
-{
-  "companyId": "uuid",
-  "customerId": "uuid",
-  "invoiceNumber": "INV-001",
-  "invoiceDate": "2024-01-15",
-  "dueDate": "2024-02-15",
-  "placeOfSupply": "Maharashtra",
-  "items": [
-    {
-      "itemId": "uuid",
-      "description": "Web Development",
-      "hsnCode": "998314",
-      "quantity": 100,
-      "unit": "hours",
-      "rate": 500,
-      "taxRate": 18
-    }
-  ],
-  "notes": "Thank you for your business",
-  "terms": "Payment due within 30 days"
-}
-```
-
-**Backend Auto-calculations**:
-- `amount = quantity × rate`
-- `taxAmount = amount × (taxRate / 100)`
-- If same state: `cgst = taxAmount / 2`, `sgst = taxAmount / 2`
-- If different state: `igst = taxAmount`
-- `subtotal = sum of all amounts`
-- `totalTax = sum of all taxAmounts`
-- `grandTotal = subtotal + totalTax`
-
-#### Get Invoice by ID
-```http
-GET /api/invoices/:id
-```
-**Auth**: Required
-
-#### Update Invoice
-```http
-PUT /api/invoices/:id
-```
-**Auth**: Required
-
-#### Delete Invoice
-```http
-DELETE /api/invoices/:id
-```
-**Auth**: Required
-
----
-
-### 📊 Dashboard Endpoints
-
-#### Get Dashboard Metrics
-```http
-GET /api/dashboard/metrics
-```
-**Auth**: Required  
-**Response**:
-```json
-{
-  "totalRevenue": 2500000,
-  "totalInvoices": 250,
-  "activeCustomers": 75,
-  "pendingPayments": 350000,
-  "monthlyRevenue": [
-    { "month": "Jan", "revenue": 200000 },
-    { "month": "Feb", "revenue": 250000 }
-  ],
-  "gstSummary": {
-    "cgst": 45000,
-    "sgst": 45000,
-    "igst": 20000,
-    "total": 110000
-  }
-}
-```
-
----
-
-## 🛡️ Middleware
-
-### 1. Authentication Middleware (`authMiddleware.js`)
-
-**Purpose**: Validate Supabase JWT token and extract user
-
-```javascript
-const authMiddleware = async (req, res, next) => {
-  try {
-    const token = req.headers.authorization?.split(' ')[1];
-    
-    if (!token) {
-      return res.status(401).json({ error: 'No token provided' });
-    }
-    
-    const { data: { user }, error } = await supabase.auth.getUser(token);
-    
-    if (error || !user) {
-      return res.status(401).json({ error: 'Invalid token' });
-    }
-    
-    req.user = user; // Attach user to request
-    next();
-  } catch (error) {
-    res.status(401).json({ error: 'Authentication failed' });
-  }
-};
-```
-
-**Usage**:
-```javascript
-app.get('/api/protected-route', authMiddleware, (req, res) => {
-  // req.user is available here
-});
-```
-
----
-
-### 2. Subscription Middleware (`subscriptionMiddleware.js`)
-
-#### `requireActiveSubscription`
-
-**Purpose**: Block access if user doesn't have active subscription
-
-```javascript
-const requireActiveSubscription = async (req, res, next) => {
-  const subscription = await subscriptionService.getSubscription(req.user.id);
-  
-  if (!subscription || !subscriptionService.hasActiveSubscription(subscription)) {
-    return res.status(403).json({
-      error: 'Active subscription required',
-      message: 'Please upgrade your plan to continue'
-    });
-  }
-  
-  next();
-};
-```
-
-#### `checkInvoiceLimit`
-
-**Purpose**: Block invoice creation if limit exceeded
-
-```javascript
-const checkInvoiceLimit = async (req, res, next) => {
-  const subscription = await subscriptionService.getSubscription(req.user.id);
-  
-  if (!subscriptionService.canCreateInvoice(subscription)) {
-    return res.status(403).json({
-      error: 'Invoice limit reached',
-      message: `You've used ${subscription.invoicesUsed} of ${subscription.invoicesLimit} invoices. Upgrade to continue.`
-    });
-  }
-  
-  next();
-};
-```
-
-**Usage**:
-```javascript
-router.post('/invoices', 
-  authMiddleware, 
-  requireActiveSubscription, 
-  checkInvoiceLimit, 
-  createInvoice
-);
-```
-
----
-
-### 3. CORS Middleware
-
-**Purpose**: Allow cross-origin requests from frontend
-
-```javascript
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-```
-
----
-
-## 🔧 Services
-
-### 1. Subscription Service (`subscriptionService.js`)
-
-**Core Business Logic for Subscription Management**
-
-#### Methods:
-
-##### `getSubscription(userId)`
-Returns subscription for a user
-```javascript
-const subscription = await subscriptionService.getSubscription(userId);
-```
-
-##### `hasActiveSubscription(subscription)`
-Checks if subscription is active and not expired
-```javascript
-const isActive = subscriptionService.hasActiveSubscription(subscription);
-// Returns: true/false
-```
-
-##### `createTrialSubscription(userId)`
-Creates 7-day trial with FREE plan
-```javascript
-const trial = await subscriptionService.createTrialSubscription(userId);
-// Sets trialEndsAt = now + 7 days
-// Sets invoicesLimit = 10, customersLimit = 50, itemsLimit = 100
-```
-
-##### `canCreateInvoice(subscription)`
-Checks if user can create more invoices
-```javascript
-const canCreate = subscriptionService.canCreateInvoice(subscription);
-// Returns: subscription.invoicesUsed < subscription.invoicesLimit
-```
-
-##### `incrementInvoiceUsage(userId)`
-Increments invoice counter after successful creation
-```javascript
-await subscriptionService.incrementInvoiceUsage(userId);
-// subscription.invoicesUsed++
-```
-
-##### `getPlanDetails(planName)`
-Returns features and limits for a plan
-```javascript
-const planInfo = subscriptionService.getPlanDetails('BASIC');
-// Returns: { name, price, invoicesLimit, ... }
-```
-
-##### `activateSubscription(userId, plan, paymentId)`
-Activates a paid subscription
-```javascript
-await subscriptionService.activateSubscription(userId, 'PROFESSIONAL', 'pay_123');
-// Sets status = ACTIVE, plan = PROFESSIONAL
-// Sets endDate = now + 30 days
-```
-
----
-
-### 2. Company Service (`companyService.js`)
-
-**Manage company profiles**
-
-```javascript
-// Get company for user
-const company = await companyService.getCompanyByUserId(userId);
-
-// Create company
-const company = await companyService.createCompany(userId, companyData);
-
-// Update company
-const updated = await companyService.updateCompany(companyId, updateData);
-```
-
----
-
-### 3. Customer Service (`customerService.js`)
-
-**CRUD operations for customers**
-
-```javascript
-// Get all customers for user
-const customers = await customerService.getCustomersByUserId(userId);
-
-// Create customer (with limit check)
-const customer = await customerService.createCustomer(userId, customerData);
-
-// Search customers
-const results = await customerService.searchCustomers(userId, 'john');
-```
-
----
-
-### 4. Invoice Service (`invoiceService.js`)
-
-**Invoice management with GST calculations**
-
-```javascript
-// Calculate taxes
-const taxes = invoiceService.calculateGST(amount, taxRate, sameState);
-// Returns: { cgst, sgst, igst, totalTax }
-
-// Create invoice
-const invoice = await invoiceService.createInvoice(userId, invoiceData);
-// Auto-calculates all totals and taxes
-
-// Get invoices with filters
-const invoices = await invoiceService.getInvoices(userId, { 
-  status: 'PAID', 
-  startDate: '2024-01-01' 
-});
-```
-
----
-
-## 🔧 Environment Variables
-
-Create a `.env` file in the root directory:
+Create `.env` in the repository root:
 
 ```env
-# Database Connection String
-DATABASE_URL="postgresql://username:password@localhost:5432/invoice_db?schema=public"
+# Database (Prisma)
+DATABASE_URL="postgresql://user:pass@host:6543/postgres?pgbouncer=true"
+DIRECT_URL="postgresql://user:pass@host:5432/postgres"
 
-# Server Configuration
+# Supabase
+SUPABASE_URL="https://<project-ref>.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
+
+# Server
 PORT=3001
 NODE_ENV=development
 
-# Supabase Configuration
-SUPABASE_URL=https://your-project-id.supabase.co
-SUPABASE_ANON_KEY=your_supabase_anon_key
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+# CORS — must match the client origin exactly, no trailing slash
+FRONTEND_URL="http://localhost:5173"
 
-# Frontend URL (for CORS)
-FRONTEND_URL=http://localhost:5173
-
-# JWT Secret (if using custom JWT)
-JWT_SECRET=your_random_secret_key_here
-
-# Payment Gateway (Optional)
-RAZORPAY_KEY_ID=your_razorpay_key_id
-RAZORPAY_KEY_SECRET=your_razorpay_key_secret
-
-# Email Service (Optional)
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your_email@gmail.com
-SMTP_PASS=your_app_password
+# Dev only: create users pre-confirmed and return a session immediately
+AUTH_AUTOCONFIRM=true
 ```
 
-**Security Notes**:
-- Never commit `.env` file to Git
-- Use different keys for dev/staging/production
-- Rotate secrets regularly
-- Use service role key only on backend (never expose to frontend)
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | yes | Runtime connection. Use the pooled/pgbouncer endpoint in serverless deploys. |
+| `DIRECT_URL` | yes | Non-pooled connection Prisma uses for migrations and introspection. |
+| `SUPABASE_URL` | yes | Project URL. |
+| `SUPABASE_SERVICE_ROLE_KEY` | yes | Full-privilege key used for `auth.getUser()` and `auth.admin.createUser()`. **Never ship this to a browser.** |
+| `FRONTEND_URL` | yes | Single allowed CORS origin; `credentials: true` is enabled. A trailing slash breaks preflight. |
+| `PORT` | no | Defaults to `3001`. |
+| `NODE_ENV` | no | `development` includes real error messages in 500 responses. |
+| `AUTH_AUTOCONFIRM` | no | Defaults to **true** whenever `NODE_ENV !== production`. Bypasses Supabase email confirmation, which does not deliver to non-team addresses on local projects. Set `false` in any shared environment. |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | no | Reserved for invoice email; no code path uses them yet. |
+
+`.env` is git-ignored — never commit real keys.
 
 ---
 
-## 📜 Scripts
+## Scripts
 
-```bash
-# Development
-npm run dev              # Start with nodemon (auto-restart on changes)
-npm start                # Start in production mode
+| Script | Action |
+| --- | --- |
+| `npm start` | `node src/index.js` |
+| `npm run dev` | `node --watch src/index.js` |
+| `npm run db:generate` | `prisma generate` |
+| `npm run db:push` | `prisma db push` — sync schema without a migration |
+| `npm run db:migrate` | `prisma migrate dev` |
+| `npm run db:studio` | `prisma studio` — browse data |
+| `npm run db:seed` | `node prisma/seed.js` — **note: `prisma/seed.js` does not exist yet** |
 
-# Database
-npx prisma migrate dev   # Create and apply migration
-npx prisma migrate reset # Reset database (deletes all data)
-npx prisma migrate deploy # Apply pending migrations (production)
-npx prisma generate      # Generate Prisma Client
-npx prisma studio        # Open database GUI on http://localhost:5555
+---
 
-# Database Seeding (future)
-npm run seed             # Populate database with test data
+## Request Lifecycle
 
-# Testing (future)
-npm test                 # Run unit tests with Jest
-npm run test:e2e         # Run integration tests
-
-# Code Quality
-npm run lint             # Run ESLint
-npm run format           # Format code with Prettier
+```mermaid
+flowchart LR
+    REQ["Incoming request"] --> CORS["cors(FRONTEND_URL)"]
+    CORS --> BODY["express.json + urlencoded + cookieParser"]
+    BODY --> PUB{"public route?"}
+    PUB -- "/health, /api/auth/*" --> H["handler"]
+    PUB -- "everything else" --> SA["supabaseAuth"]
+    SA -- "no / bad token" --> E401["401"]
+    SA -- "valid" --> PROV["auto-provision User row"]
+    PROV --> GUARD{"route guards"}
+    GUARD -- "requireActiveSubscription / checkInvoiceLimit" --> ZOD["Zod DTO validation"]
+    ZOD -- invalid --> E400["400 + details"]
+    ZOD -- valid --> H
+    H --> DB[("Prisma → PostgreSQL")]
+    H --> RES["JSON response"]
+    H -. "next(err)" .-> EH["errorHandler"]
+    EH --> RES
 ```
 
----
+Middleware order in [`src/index.js`](src/index.js):
 
-## 🚀 Deployment
-
-### Option 1: Render.com (Recommended)
-
-1. **Create PostgreSQL Database**:
-   - Go to Render Dashboard
-   - Create new PostgreSQL database
-   - Copy connection string
-
-2. **Create Web Service**:
-   - Connect GitHub repository
-   - Select `invoice_generator_server` directory
-   - Build Command: `npm install && npx prisma generate && npx prisma migrate deploy`
-   - Start Command: `npm start`
-
-3. **Add Environment Variables**:
-   ```
-   DATABASE_URL=<render_postgres_connection_string>
-   SUPABASE_URL=<your_supabase_url>
-   SUPABASE_ANON_KEY=<your_anon_key>
-   FRONTEND_URL=<your_frontend_domain>
-   ```
-
-4. **Deploy**: Click "Create Web Service"
-
----
-
-### Option 2: Railway.app
-
-1. **Create Project**: Click "New Project" → "Deploy from GitHub"
-2. **Add PostgreSQL Plugin**: Click "New" → "Database" → "PostgreSQL"
-3. **Configure Variables**: Add all environment variables
-4. **Deploy**: Automatic deployment on push
-
----
-
-### Option 3: Heroku
-
-```bash
-# Install Heroku CLI
-heroku login
-
-# Create app
-heroku create invoice-api
-
-# Add PostgreSQL
-heroku addons:create heroku-postgresql:mini
-
-# Set environment variables
-heroku config:set SUPABASE_URL=your_url
-heroku config:set FRONTEND_URL=your_frontend
-
-# Deploy
-git push heroku main
-
-# Run migrations
-heroku run npx prisma migrate deploy
+```
+cors(FRONTEND_URL, credentials) → express.json → urlencoded → cookieParser
+  → /health                      (public)
+  → /api/auth/*                  (public)
+  → supabaseAuth → /api/{company,customer,item,invoice,settings,subscription}
+  → errorHandler → 404 fallback
 ```
 
+| Prefix | Router | Auth |
+| --- | --- | --- |
+| `/health` | inline | public |
+| `/api/auth` | `routes/auth.js` | public |
+| `/api/company` | `routes/company.js` | `supabaseAuth` |
+| `/api/customer` | `routes/customer.js` | `supabaseAuth` |
+| `/api/item` | `routes/item.js` | `supabaseAuth` |
+| `/api/invoice` | `routes/invoice.js` | `supabaseAuth` (+ subscription guards on create) |
+| `/api/settings` | `routes/settings.js` | `supabaseAuth` |
+| `/api/subscription` | `routes/subscription.js` | `supabaseAuth` |
+
+A `SIGINT` handler disconnects Prisma before the process exits.
+
 ---
 
-### Option 4: VPS (Ubuntu)
+## Authentication
 
-```bash
-# SSH into server
-ssh user@your-server-ip
+Supabase Auth owns credentials and issues the JWT. This API only verifies tokens and keeps
+a local `User` row so domain records have a foreign key to point at.
 
-# Install Node.js
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt install -y nodejs
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as This API
+    participant S as Supabase Auth
+    participant D as PostgreSQL
 
-# Install PostgreSQL
-sudo apt install postgresql postgresql-contrib
+    C->>A: POST /api/auth/login {email, password}
+    A->>S: signInWithPassword()
+    S-->>A: session {access_token, refresh_token}
+    A->>D: upsert User (authId)
+    A-->>C: {user, access_token}
 
-# Clone repository
-git clone https://github.com/rupeshv2121/invoice_generator_server.git
-cd invoice_generator_server
-
-# Install dependencies
-npm install
-
-# Setup environment
-nano .env
-# Paste all environment variables
-
-# Run migrations
-npx prisma migrate deploy
-
-# Install PM2 (process manager)
-sudo npm install -g pm2
-
-# Start server
-pm2 start npm --name "invoice-api" -- start
-
-# Setup Nginx reverse proxy
-sudo apt install nginx
-sudo nano /etc/nginx/sites-available/invoice-api
-# Configure proxy to localhost:3001
-
-# Enable SSL with Let's Encrypt
-sudo apt install certbot python3-certbot-nginx
-sudo certbot --nginx -d api.yourdomain.com
+    C->>A: GET /api/invoice (Authorization: Bearer token)
+    A->>S: supabase.auth.getUser(token)
+    alt invalid or expired
+        S-->>A: error
+        A-->>C: 401 Invalid or expired token
+    else valid
+        S-->>A: user
+        A->>D: auto-provision User row if missing
+        A->>D: query scoped by companyProfileId
+        D-->>A: rows
+        A-->>C: 200 JSON
+    end
 ```
 
----
+**`supabaseAuth`** ([`src/middleware/auth.js`](src/middleware/auth.js)):
 
-## 🔒 Security Best Practices
+1. Requires an `Authorization: Bearer <token>` header — `401 No token provided` / `401 Malformed token` otherwise.
+2. Calls `supabase.auth.getUser(token)` — `401 Invalid or expired token` on failure.
+3. Attaches the Supabase user to `req.user`.
+4. Auto-provisions a local `User` row (`id` = `authId` = Supabase user id) if none exists. Provisioning failures are logged but do not block the request.
 
-- ✅ **Never expose service role key**: Use only on backend
-- ✅ **Validate all inputs**: Use Joi/Zod for request validation
-- ✅ **Sanitize data**: Prevent SQL injection (Prisma handles this)
-- ✅ **Rate limiting**: Add express-rate-limit middleware
-- ✅ **Helmet.js**: Add security headers
-- ✅ **HTTPS only**: Force SSL in production
-- ✅ **CORS whitelist**: Only allow specific origins
-- ✅ **Log monitoring**: Use Winston or Morgan for logging
-- ✅ **Error handling**: Never expose stack traces in production
+**`requireRole(roles)`** exists as a role gate but is not currently attached to any route.
 
----
+### Registration flow
 
-## 📞 Support & Contact
+`POST /api/auth/register` branches on `AUTH_AUTOCONFIRM`:
 
-- 📧 **Email**: rupeshvarshney7@gmail.com
-- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/rupeshv2121/invoice_generator_server/issues)
-- 📖 **Documentation**: See this README
+- **On (default outside production):** `supabase.auth.admin.createUser({ email_confirm: true })`, then an immediate `signInWithPassword()` so the response carries a usable session. This exists because Supabase's built-in mailer refuses to deliver confirmation links to addresses outside the project team, which makes local signup untestable.
+- **Off:** the standard `supabase.auth.signUp()` flow. `access_token` may be `null` until the user confirms by email.
+
+Either way the user metadata (`fullName`, `phone`, `companyName`, `gstRegistered`, `gstin`)
+is stored on the Supabase user, and `syncUserRecord()` upserts the local `User` row.
 
 ---
 
-## 📝 License
+## Subscription Layer
 
-MIT License - see [LICENSE](LICENSE) file
+[`SubscriptionService`](src/services/subscriptionService.js) is the single place plan rules
+live.
+
+| Method | Purpose |
+| --- | --- |
+| `hasActiveSubscription(userId)` | Time-aware active check — `TRIAL` before `trialEndDate`, `ACTIVE` before `endDate` |
+| `getSubscription(userId)` | Subscription record plus derived `isActive` and `daysRemaining` |
+| `getDaysRemaining(subscription)` | Whole days until trial or plan expiry, floored at 0 |
+| `createTrialSubscription(userId)` | 7-day `FREE`/`TRIAL` record; throws if one already exists |
+| `activateSubscription(userId, plan, paymentId)` | Upserts a 1-month `ACTIVE` plan with that plan's limits |
+| `getPlanDetails(plan)` / `getAllPlans()` | Plan catalogue — price, limits, feature list |
+| `canCreateInvoice(userId)` | Active **and** under the invoice limit |
+| `incrementInvoiceUsage(userId)` | Bumps `invoicesUsed`; no-op when unlimited |
+| `getRemainingInvoices(userId)` | `invoiceLimit - invoicesUsed`, `Infinity` when unlimited |
+| `expireSubscription` / `cancelSubscription` | Status transitions |
+
+**Plans** (`-1` = unlimited):
+
+| Plan | ₹/month | Invoices | Customers | Items |
+| --- | ---: | ---: | ---: | ---: |
+| `FREE` (7-day trial) | 0 | 10 | 50 | 100 |
+| `BASIC` | 499 | 100 | 200 | 500 |
+| `PROFESSIONAL` | 999 | ∞ | ∞ | ∞ |
+| `ENTERPRISE` | 2499 | ∞ | ∞ | ∞ |
+
+**Guards** ([`subscriptionMiddleware.js`](src/middleware/subscriptionMiddleware.js)):
+
+| Guard | Applied to | Failure |
+| --- | --- | --- |
+| `requireActiveSubscription` | `POST /api/invoice` | `403 { code: "SUBSCRIPTION_REQUIRED" }` |
+| `checkInvoiceLimit` | `POST /api/invoice` | `403 { code: "LIMIT_REACHED", remaining }` |
+| `checkCustomerLimit` | *(defined, not mounted)* | — |
+| `checkItemLimit` | *(defined, not mounted)* | — |
 
 ---
 
-<div align="center">
+## Database Schema
 
-**Built with ❤️ by [Rupesh Varshney](https://github.com/rupeshv2121)**
+Full definition in [`prisma/schema.prisma`](prisma/schema.prisma). All ids are UUIDs; all
+tables are snake_cased via `@@map`; every model carries `createdAt` / `updatedAt`.
 
-</div>
+```mermaid
+erDiagram
+    User ||--o| CompanyProfile : owns
+    User ||--o| Subscription : has
+    User ||--o{ Payment : makes
+    User ||--o{ Invoice : issues
+    CompanyProfile ||--o| Settings : configures
+    CompanyProfile ||--o{ Customer : manages
+    CompanyProfile ||--o{ Item : catalogues
+    CompanyProfile ||--o{ Invoice : bills_from
+    Customer ||--o{ Invoice : billed_to
+    Invoice ||--o{ InvoiceItem : contains
+    Item ||--o{ InvoiceItem : referenced_by
+```
+
+### `User` → `users`
+`id`, `authId` (unique, Supabase id), `role` (default `USER`). Relations: `company`,
+`invoices`, `subscription`, `payments`.
+
+### `CompanyProfile` → `company_profiles`
+One per user (`userId` unique, cascade delete). Identity: `fullName`, `phone`, `email`,
+`website`, `companyName`. Compliance: `gstRegistered`, `gstin`, `pan`, `iecCode`, `arn`.
+Address: `address`, `city`, `state`, `pincode`, `country` (default `India`). Banking:
+`bankName`, `bankAccountNumber`, `bankIfscCode`, `bankBranch`. Plus `logoPath`, `isActive`.
+
+### `Customer` → `customers`
+`name`, `companyName`, address block, `phone`, `email`, `EximCode`, `gstin`, `pan`,
+`isActive`, optional `companyProfileId` (cascade delete).
+
+### `Item` → `items`
+`name`, `description`, `hsnCode` (Int), `unit` (default `pcs`), `purchasePrice`,
+`sellingPrice` (`Decimal(10,2)`), `cgstRate` / `sgstRate` / `igstRate` (`Decimal(5,2)`),
+`isActive`, optional `companyProfileId` (cascade delete).
+
+### `Invoice` → `invoices`
+`invoiceNumber` (unique), `invoiceDate`, `dueDate`, and shipping metadata `marka`,
+`dateOfSupply`, `stateCode`, `transportation`. Totals as `Decimal(12,2)`: `subtotal`,
+`cgstAmount`, `sgstAmount`, `igstAmount`, `totalAmount`. Plus `amountInWords`, `notes`,
+`status` (default `DRAFT`). FKs: `userId`, `companyProfileId`, `customerId`.
+
+### `InvoiceItem` → `invoice_items`
+Line snapshot: `description`, `hsnCode`, `unit`, `quantity` and `rate` (`Decimal(10,2)`),
+`amount`, per-line rates (defaults 9 / 9 / 18) and amounts, `totalAmount`. `invoiceId`
+cascades on delete; `itemId` is optional so ad-hoc lines are allowed and catalogue edits do
+not rewrite history.
+
+### `Settings` → `settings`
+One per company (`companyProfileId` unique, cascade delete). `invoicePrefix` (default
+`INV`), `nextInvoiceNumber` (default `1`), `defaultCgstRate` / `defaultSgstRate` /
+`defaultIgstRate` (9 / 9 / 18), `termsConditions`.
+
+### `Subscription` → `subscriptions`
+One per user. `plan`, `status`, `startDate`, `endDate`, `trialEndDate`, `paymentMethod`,
+`lastPaymentDate`, `nextBillingDate`, `amount`, `currency` (default `INR`), and the limit
+counters `invoiceLimit`, `invoicesUsed`, `customersLimit`, `itemsLimit`. Indexed on
+`userId` and `status`.
+
+### `Payment` → `payments`
+`amount`, `currency`, `status`, `paymentMethod`, `transactionId` (unique), plus
+`razorpayOrderId` / `razorpayPaymentId` / `razorpaySignature`. Indexed on `userId` and
+`status`. **No route currently writes to this table.**
+
+### Enums
+- `SubscriptionPlan` — `FREE`, `BASIC`, `PROFESSIONAL`, `ENTERPRISE`
+- `SubscriptionStatus` — `TRIAL`, `ACTIVE`, `EXPIRED`, `CANCELLED`, `SUSPENDED`
+- `PaymentStatus` — `PENDING`, `COMPLETED`, `FAILED`, `REFUNDED`
+
+Invoice `status` is a plain string validated by Zod, not a database enum:
+`DRAFT` | `SENT` | `PAID` | `OVERDUE` | `CANCELLED`.
+
+---
+
+## API Reference
+
+Base URL: `http://localhost:3001` (dev). Every route below except `/health` and
+`/api/auth/*` requires `Authorization: Bearer <supabase_access_token>`.
+
+### Health
+
+| Method | Path | Response |
+| --- | --- | --- |
+| `GET` | `/health` | `{ status: "OK", message: "..." }` |
+
+### Auth — `/api/auth`
+
+| Method | Path | Body | Response |
+| --- | --- | --- | --- |
+| `POST` | `/register` | `email`, `password`, `name`/`fullName`, `phone?`, `companyName?`, `gstRegistered?`, `gstin?` | `201` `{ message, user, access_token, refresh_token }` |
+| `POST` | `/login` | `email`, `password` | `200` `{ message, user, access_token, refresh_token }` — `401` on bad credentials |
+| `GET` | `/me` | — (bearer token) | current Supabase user |
+
+### Company — `/api/company`
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/` | The authenticated user's company profile(s) |
+| `GET` | `/:id` | Single company profile |
+| `POST` | `/` | Create the company profile (onboarding) |
+| `PATCH` | `/:id` | Partial update |
+| `DELETE` | `/:id` | Delete — cascades to customers, items, settings |
+
+### Customers — `/api/customer`
+
+| Method | Path | Query / Body | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/stats` | — | Aggregate customer counts |
+| `GET` | `/` | `search`, `page`, `limit`, filters | Paginated list scoped to the company |
+| `GET` | `/:id` | — | Single customer, with invoice history |
+| `POST` | `/` | customer DTO | Create |
+| `PATCH` | `/:id` | partial DTO | Update |
+| `DELETE` | `/:id` | — | Delete |
+
+`/stats` is registered before `/:id`, so it resolves correctly.
+
+### Items — `/api/item`
+
+| Method | Path | Query / Body | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/stats` | — | Catalogue stats |
+| `GET` | `/` | `search`, `page`, `limit`, filters | Paginated list |
+| `GET` | `/search/autocomplete` | `q`, `companyId` | Typeahead for invoice line entry |
+| `POST` | `/` | item DTO | Create |
+| `PATCH` | `/:id` | partial DTO | Update |
+| `DELETE` | `/:id` | — | Delete |
+
+### Invoices — `/api/invoice`
+
+| Method | Path | Query / Body | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/` | `search`, `page` (1), `limit` (10), `status`, `customerId`, `startDate`, `endDate` | Paginated list. Returns `404` if the user has no company profile yet. |
+| `GET` | `/:id` | — | Invoice with company, customer, and line items |
+| `POST` | `/` | invoice DTO with `invoiceItems[]` | **Guarded** by `requireActiveSubscription` + `checkInvoiceLimit`. Generates the number, recomputes totals, writes header + lines in one transaction, increments usage. `201`. |
+| `PUT` | `/:id` | invoice DTO | Full update, totals recomputed |
+| `DELETE` | `/:id` | — | Delete — cascades to line items |
+| `GET` | `/stats` | — | ⚠️ Registered after `/:id` and therefore unreachable (see [Known Gaps](#known-gaps)) |
+
+### Settings & Reports — `/api/settings`
+
+| Method | Path | Query | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/:companyId` | — | Settings for a company; created with defaults if absent |
+| `PUT` | `/:companyId` | settings DTO | Update prefix, next number, default tax rates, terms |
+| `GET` | `/reports/dashboard` | `companyId?` | Total invoices, total revenue, current vs. last month, recent invoices |
+| `GET` | `/reports/revenue` | `companyId?`, `period` (`monthly`), `year?` | Revenue time series |
+| `GET` | `/reports/gst` | `companyId?`, `startDate?`, `endDate?` | CGST / SGST / IGST breakdown |
+
+All report queries are scoped by `company.userId = req.user.id`.
+
+### Subscription — `/api/subscription`
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/current` | Full subscription with `isActive` and `daysRemaining` |
+| `GET` | `/status` | Lightweight: `{ hasActive, status, plan, daysRemaining, invoicesRemaining }` |
+| `GET` | `/plans` | Plan catalogue with prices, limits, feature lists |
+| `POST` | `/trial` | Start the 7-day trial — `400` if a subscription already exists |
+| `POST` | `/cancel` | Set status to `CANCELLED` |
+
+---
+
+## Core Pipelines
+
+### Onboarding
+
+```mermaid
+flowchart LR
+    R["POST /api/auth/register"] --> SB["Supabase user created<br/>(admin API when AUTH_AUTOCONFIRM)"]
+    SB --> U["User row synced (authId)"]
+    U --> CP["POST /api/company<br/>CompanyProfile created"]
+    CP --> ST["Settings auto-created on first<br/>invoice number request"]
+    CP --> TR["POST /api/subscription/trial<br/>7-day FREE trial"]
+```
+
+### Invoice creation
+
+```mermaid
+flowchart TD
+    E["POST /api/invoice"] --> F{"requireActiveSubscription"}
+    F -- no --> F1["403 SUBSCRIPTION_REQUIRED"]
+    F -- yes --> G{"checkInvoiceLimit"}
+    G -- exceeded --> G1["403 LIMIT_REACHED + remaining"]
+    G -- ok --> H["Zod validateInvoice()"]
+    H -- invalid --> H1["400 + field details"]
+    H -- valid --> I["generateInvoiceNumber()<br/>PREFIX-0001 from Settings"]
+    I --> J["Recompute per-line amount,<br/>CGST, SGST, IGST, total"]
+    J --> K["prisma.transaction:<br/>Invoice + InvoiceItem rows"]
+    K --> L["incrementInvoiceUsage()"]
+    L --> M["201 invoice + company + customer + items"]
+```
+
+**Tax maths** — identical in [`invoiceUtils.js`](src/utils/invoiceUtils.js) and the `POST`
+handler:
+
+```
+amount      = quantity × rate
+cgst        = amount × cgstRate / 100
+sgst        = amount × sgstRate / 100
+igst        = amount × igstRate / 100
+lineTotal   = amount + cgst + sgst + igst
+totalAmount = Σ amount + Σ cgst + Σ sgst + Σ igst
+```
+
+Defaults are 9% CGST + 9% SGST for intra-state and 18% IGST for inter-state, overridable
+per company in `Settings` and per line at entry time. The header stores the sums; the server
+always recomputes, so client-supplied totals are ignored.
+
+**Invoice numbering** — [`generateInvoiceNumber(companyProfileId)`](src/utils/invoiceUtils.js)
+reads the company's `Settings` (creating it with `INV` / `1` if missing), formats
+`` `${prefix}-${next.toString().padStart(4, "0")}` ``, then increments the counter. On any
+error it falls back to `INV-<timestamp>` so invoice creation is never blocked by numbering.
+
+> The read-format-increment sequence is not wrapped in a transaction, so two simultaneous
+> creates for the same company can contend. `invoiceNumber` is unique at the database level,
+> so the loser fails with a `P2002` → `400` rather than producing a duplicate.
+
+### Subscription lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> TRIAL: POST /subscription/trial (7 days)
+    TRIAL --> ACTIVE: plan activated (paid)
+    TRIAL --> EXPIRED: trialEndDate passed
+    ACTIVE --> EXPIRED: endDate passed
+    ACTIVE --> CANCELLED: POST /subscription/cancel
+    EXPIRED --> ACTIVE: renewal
+    CANCELLED --> [*]
+```
+
+`hasActiveSubscription()` is time-aware: a `TRIAL` counts as active only before
+`trialEndDate`, an `ACTIVE` plan only before `endDate`. `invoiceLimit: -1` means unlimited
+and short-circuits both the limit check and the usage increment.
+
+### Currency and formatting
+
+`formatCurrency()` uses `Intl.NumberFormat("en-IN", { currency: "INR" })` for Indian digit
+grouping. Amount-in-words conversion (Crore / Lakh / Thousand) happens client-side during
+PDF generation; the `Invoice.amountInWords` column stores the result.
+
+---
+
+## Validation
+
+Zod schemas live in [`src/dto/`](src/dto) — one per resource (`companyDto`, `customerDto`,
+`invoiceDto`, `itemDto`, `settingsDto`, `userDto`). Each exports a schema plus
+`validateX()` / `validateXUpdate()` helpers built on `safeParse`, so handlers return
+structured field errors rather than throwing.
+
+Invoice rules, as an example:
+
+```js
+customerId    // uuid, required
+invoiceDate   // string | Date → coerced to Date
+status        // DRAFT | SENT | PAID | OVERDUE | CANCELLED, default DRAFT
+invoiceItems  // at least one line
+  description // required, non-empty
+  quantity    // positive number
+  rate        // positive number
+  cgstRate    // 0..50, default 9
+  sgstRate    // 0..50, default 9
+  igstRate    // 0..50, default 18
+```
+
+Failures respond `400 { error: "Validation failed", details: [...] }`.
+
+---
+
+## Error Handling
+
+[`errorHandler`](src/middleware/errorHandler.js) is the terminal middleware; an unmatched
+path falls through to a `404 { error: "Route not found" }`.
+
+| Condition | Status | Body |
+| --- | --- | --- |
+| Prisma `P2002` (unique violation) | 400 | `Duplicate entry` |
+| Prisma `P2025` (record missing) | 404 | `Record not found` |
+| `ValidationError` | 400 | `Validation error` |
+| `JsonWebTokenError` | 401 | `Invalid token` |
+| `TokenExpiredError` | 401 | `Token expired` |
+| Anything else | `err.status` or 500 | `Internal server error` — real message only when `NODE_ENV=development` |
+
+---
+
+## Deployment
+
+[`vercel.json`](vercel.json) builds `src/index.js` with `@vercel/node` and routes every
+path to it.
+
+```json
+{ "builds": [{ "src": "src/index.js", "use": "@vercel/node" }],
+  "routes": [{ "src": "/(.*)", "dest": "src/index.js" }] }
+```
+
+Checklist:
+
+1. Configure all environment variables in the Vercel project (production scope).
+2. Use the **pooled** connection string for `DATABASE_URL` — serverless functions exhaust direct connections quickly.
+3. Apply migrations from a machine with `DIRECT_URL` set: `npx prisma migrate deploy`.
+4. Set `FRONTEND_URL` to the deployed client origin, no trailing slash.
+5. Leave `AUTH_AUTOCONFIRM` unset (or `false`) with `NODE_ENV=production` so email confirmation is enforced.
+6. Regenerate the Prisma Client for the Linux target rather than shipping the committed Windows engine binary.
+
+---
+
+## Known Gaps
+
+Documented deliberately so they are not rediscovered as bugs. Each is a real inconsistency
+in the current code, not a design choice.
+
+| Gap | Detail |
+| --- | --- |
+| `GET /api/invoice/stats` unreachable | `/:id` is registered first, so `stats` is parsed as an id. Move the `/stats` handler above `/:id` to fix. |
+| No `/api/dashboard` router | The client calls `/api/dashboard/stats` and `/api/dashboard/overdue`; the equivalent data lives at `/api/settings/reports/dashboard`. |
+| Ownership check disabled on invoice create | The company/customer verification block in `POST /api/invoice` is commented out; both ids are trusted from the body. |
+| Customer / item limits unenforced | `checkCustomerLimit` and `checkItemLimit` are never mounted, and read `req.prisma`, which is never set. |
+| No payment integration | `Payment` carries Razorpay columns and `activateSubscription()` exists, but nothing exposes them over HTTP. |
+| `requireRole` unused | Every authenticated user has identical permissions. |
+| Dev auth bypass defaults on | `AUTH_AUTOCONFIRM` is enabled whenever `NODE_ENV !== production`, creating pre-confirmed users. |
+| `db:seed` script has no file | `prisma/seed.js` is referenced but absent. |
+| Generated client committed | `src/generated/prisma/` includes a Windows `.node` engine; run `npm run db:generate` on other platforms. |
+| `routes/auth.js.bak` | Stale backup file still in the tree. |
+| No tests | No test runner or test files are configured. |
+
+---
+
+## License
+
+No license file is present. Add one before distributing.

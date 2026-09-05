@@ -52,6 +52,7 @@ model CompanyProfile {
   customers         Customer[]
   invoices          Invoice[]
   items             Item[]
+  settings          Settings?
 
   @@map("company_profiles")
 }
@@ -152,6 +153,22 @@ model InvoiceItem {
   item        Item?   @relation(fields: [itemId], references: [id])
 
   @@map("invoice_items")
+}
+
+model Settings {
+  id                String         @id @default(uuid())
+  companyProfileId  String         @unique
+  company           CompanyProfile @relation(fields: [companyProfileId], references: [id], onDelete: Cascade)
+  invoicePrefix     String         @default("INV")
+  nextInvoiceNumber Int            @default(1)
+  defaultCgstRate   Decimal        @default(9.00) @db.Decimal(5, 2)
+  defaultSgstRate   Decimal        @default(9.00) @db.Decimal(5, 2)
+  defaultIgstRate   Decimal        @default(18.00) @db.Decimal(5, 2)
+  termsConditions   String?
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  @@map("settings")
 }
 
 model Subscription {

@@ -7,6 +7,7 @@ import express from 'express';
 dotenv.config();
 
 // Import routes
+import authRoutes from './routes/auth.js';
 import companyRoutes from './routes/company.js';
 import customerRoutes from './routes/customer.js';
 import invoiceRoutes from './routes/invoice.js';
@@ -37,6 +38,8 @@ app.use(cookieParser());
 app.get('/health', (req, res) => {
     res.json({ status: 'OK', message: 'Invoice Generator Server is running!' });
 });
+
+app.use('/api/auth', authRoutes);
 
 
 // app.use('/api/company', supabaseAuth, companyRoutes); // TEMPORARILY DISABLED AUTH FOR TESTING
